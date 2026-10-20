@@ -10,14 +10,15 @@
 
 ## 설치와 실행
 
-필요한 것: Windows 10/11, [Node.js](https://nodejs.org/) 20 이상, Edge 또는 Chrome.
+필요한 것: Windows 10/11 (64비트), Edge 또는 Chrome. Node.js 는 설치 파일에 들어 있습니다.
 
-```cmd
-start.cmd
-```
+- **설치 파일** `web-rpa-setup-<버전>.exe` — 관리자 권한 없이 `%LOCALAPPDATA%\Programs\web-rpa` 에 설치하고 시작 메뉴(선택하면 바탕화면)에 바로가기를 만듭니다. 바로가기를 누르면 화면이 브라우저에 열리고, 함께 뜨는 검은 창을 닫으면 멈춥니다. 이미 실행 중이면 화면만 엽니다. 제거는 Windows 설정 → 앱에서 합니다.
+- **압축본** `web-rpa-<버전>-win-x64.zip` — 원하는 폴더에 풀고 `web-rpa.cmd` 를 실행합니다.
+- 두 방식 모두 작업 데이터(레시피·실행 결과·브라우저 프로필·설정)는 `%LOCALAPPDATA%\web-rpa` 에 저장되고, 다시 설치하거나 제거해도 남습니다.
+- 설치 파일은 코드 서명이 되어 있지 않아 처음 실행할 때 "Windows의 PC 보호" 창이 뜰 수 있습니다. "추가 정보 → 실행"을 누르면 설치됩니다.
 
-처음 실행하면 의존성을 설치하고 http://127.0.0.1:4800 을 엽니다. 직접 실행하려면 `npm install` 뒤 `node src\server.js --port 4800`.
-작업 데이터(레시피·실행 결과·브라우저 프로필·설정)는 `workspace\` 에 쌓입니다.
+소스에서 실행하려면 [Node.js](https://nodejs.org/) 20 이상을 설치하고 `start.cmd` 를 실행합니다(처음에 의존성을 설치하고 http://127.0.0.1:4800 을 엽니다. 작업 데이터는 `workspace\`).
+설치 파일 만들기: [Inno Setup 6](https://jrsoftware.org/isinfo.php) 을 설치한 뒤 `node scripts\package-win.mjs --installer --smoke` (결과 `dist\`, 만든 파일을 실제로 설치·실행·제거해 확인합니다).
 
 - **브라우저**는 화면의 **설정**에서 고릅니다: 자동(Edge → Chrome → Brave → 내장 Chromium), Edge, Chrome, Brave, 내장 Chromium, 직접 지정(Chromium 계열 실행 파일). 설치 여부는 자동으로 감지하고 "시험 실행"으로 버전을 확인할 수 있습니다.
 - **프로필**은 브라우저마다 따로 둡니다(`workspace\profiles\<브라우저>`). 녹화·실행·AI 관찰이 같은 프로필을 쓰므로 녹화 브라우저에서 로그인해 두면 실행 때도 유지됩니다(사이트가 세션을 유지하는 동안).
@@ -75,7 +76,7 @@ node test\lab-server.mjs 4811 :: 시험 사이트를 띄워 직접 녹화해 보
 
 실행 화면 영상: 실행 화면에서 "실행 화면을 동영상으로 남기기"를 켜면(API 는 `options.recordVideo: true`) 탭마다 webm 이 `runs\<실행>\video\` 에 남고 리포트 화면에서 재생됩니다.
 
-공개 전 점검: `node scripts\check-release.mjs`(비밀값·개인 경로 검사), `node scripts\notices.mjs --check`(제3자 고지 갱신), `node scripts\package-win.mjs --smoke`(Node 를 함께 담은 Windows 배포 zip 을 만들고 풀어서 실행 확인).
+공개 전 점검: `node scripts\check-release.mjs`(비밀값·개인 경로 검사), `node scripts\notices.mjs --check`(제3자 고지 갱신), `node scripts\package-win.mjs --installer --smoke`(Node 를 함께 담은 설치 파일·zip 을 만들고 실제로 설치·실행·제거해 확인).
 
 ## 알려진 제한
 
