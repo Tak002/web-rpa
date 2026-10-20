@@ -1,6 +1,6 @@
 {
   "name": "web-rpa",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "웹 작업을 녹화해 엑셀 행마다 재생하는 로컬 RPA 도구",
   "type": "module",

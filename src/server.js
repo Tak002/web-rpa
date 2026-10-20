@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { Store } from './store.js';
 import { Recorder } from './recorder/recorder.js';
@@ -25,6 +26,8 @@ const argOf = (name, def) => {
 };
 const PORT = Number(argOf('--port', process.env.PORT || 4800));
 const HOST = argOf('--host', '127.0.0.1');
+// 이름으로 접속을 허용할 호스트 (IP 주소와 localhost 는 항상 허용). 예: --allow-host mypc.tailnet.ts.net
+const ALLOWED_HOSTS = new Set(['localhost', ...String(argOf('--allow-host', process.env.WEB_RPA_ALLOWED_HOSTS ?? '')).split(',').map((h) => h.trim().toLowerCase()).filter(Boolean)]);
 const store = new Store(path.resolve(argOf('--workspace', path.join(ROOT, 'workspace'))));
 const settings = new Settings(store.root);
 
@@ -378,9 +381,30 @@ route('GET', '/api/events', ({ req, res }) => {
   return undefined;
 });
 
+// ---------- 요청 출처 확인 ----------
+// 사용자가 연 다른 웹사이트가 이 로컬 서버에 요청을 보내지 못하게 한다.
+//  - 접속 주소(Host)는 IP 주소·localhost·허용한 이름만 받는다.
+//  - 브라우저가 출처(Origin)를 보낸 요청은 화면과 같은 주소에서 온 것만 받는다.
+function hostAllowed(hostHeader) {
+  if (!hostHeader) return false;
+  const host = hostHeader.trim().toLowerCase().replace(/:\d+$/, '').replace(/^\[(.*)\]$/, '$1');
+  return net.isIP(host) !== 0 || ALLOWED_HOSTS.has(host);
+}
+function originAllowed(req) {
+  const origin = req.headers.origin;
+  if (!origin) return true; // 브라우저가 아닌 호출(시험 스크립트 등)
+  try {
+    return new URL(origin).host === req.headers.host;
+  } catch {
+    return false;
+  }
+}
+
 // ---------- 서버 ----------
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
+  if (!hostAllowed(req.headers.host)) return send(res, 403, { error: '허용되지 않은 주소로 접속했습니다. IP 주소나 localhost 로 접속하거나 --allow-host 로 이름을 추가해 주세요.' });
+  if (req.method !== 'GET' && req.method !== 'HEAD' && !originAllowed(req)) return send(res, 403, { error: '다른 웹사이트에서 보낸 요청은 받지 않습니다.' });
   try {
     if (url.pathname.startsWith('/api/')) {
       for (const r of routes) {
