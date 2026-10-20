@@ -109,6 +109,7 @@ async function main() {
       ['m-report', `${BASE}/#/report/${runId}`],
       ['m-editor', `${BASE}/#/recipe/${recipe.id}`],
       ['m-run', `${BASE}/#/run?recipe=${recipe.id}`],
+      ['m-hub', `${BASE}/#/hub`], // 허브에 연결되지 않아도 화면은 그려져야 한다
     ]) {
       await m.goto(url);
       await m.waitForSelector('#app > *');

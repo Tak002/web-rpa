@@ -1,4 +1,5 @@
 // 실행기: 엑셀 행마다 레시피를 실행하고 결과(리포트·받은 파일·실패 화면·결과 엑셀·실행 기록)를 남긴다.
+// 세트로 설치한 레시피(recipe.origin)는 세트가 밝힌 사이트에만 접속하고, 행 사이 간격·한 번에 실행할 행 수를 지킨다.
 
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs/promises';
@@ -10,6 +11,7 @@ import { Scope } from './vars.js';
 import { Session, StopSignal } from './session.js';
 import { Executor } from './executor.js';
 import { writeRunFiles } from './report.js';
+import { guardSites, normOrigin } from './sites.js';
 
 const pad = (n) => String(n).padStart(2, '0');
 const firstLine = (s) => String(s ?? '').split('\n')[0];
@@ -42,6 +44,15 @@ export class Runner extends EventEmitter {
     this.stopRequested = false;
     this.waiters = [];
     this.filesDir = path.join(runDir, 'files');
+    // 세트 제한 (설치한 세트만 — 직접 녹화한 레시피는 그대로)
+    const origin = recipe?.origin && typeof recipe.origin === 'object' ? recipe.origin : null;
+    this.siteLimit = Array.isArray(origin?.sites) ? origin.sites.map(normOrigin).filter(Boolean) : null;
+    const pacing = origin?.pacing ?? {};
+    this.rowGapMs = Math.min(Math.max(Math.floor(Number(pacing.minRowIntervalMs) || 0), 0), 600_000);
+    this.rowCap = Number(pacing.maxRowsPerRun) >= 1 ? Math.floor(Number(pacing.maxRowsPerRun)) : 0;
+    this.limit = null; // 행 수 상한에 닿았을 때 { maxRowsPerRun, nextRow, skipped }
+    this.rowBlocked = null; // 이번 행에서 막은 이동
+    this.lastStep = null;
   }
 
   // ---------- 바깥에서 부르는 조작 ----------
@@ -84,6 +95,20 @@ export class Runner extends EventEmitter {
   async checkpoint() {
     while (this.status === 'paused' && !this.stopRequested) await new Promise((r) => this.waiters.push(r));
     if (this.stopRequested) throw new StopSignal();
+    if (this.rowBlocked) throw this.blockedError(); // 세트 밖 사이트로 이동했으면 다음 스텝으로 가지 않는다
+  }
+
+  // ---------- 세트 사이트 제한 ----------
+  onSiteBlocked({ url, origin, redirect }) {
+    if (!this.rowBlocked) this.rowBlocked = { url, origin, redirect };
+    this.log('error', `세트에 적히지 않은 사이트로 ${redirect ? '넘어가 되돌렸습니다' : '이동하려 해 막았습니다'}: ${clip(origin || url, 100)}`);
+  }
+
+  /** 행을 실패시키는 오류 (스텝 실패로 다시 시도하거나 "실패해도 계속"으로 넘기지 않게 신호로 보낸다) */
+  blockedError() {
+    const b = this.rowBlocked;
+    const allowed = this.siteLimit?.length ? this.siteLimit.join(', ') : '(없음)';
+    return Object.assign(new Error(`세트에 적히지 않은 사이트(${b.origin || clip(b.url, 80)})로 이동하려 해 막았습니다. 이 세트는 ${allowed} 에만 접속할 수 있습니다.`), { signal: true, siteBlocked: true });
   }
 
   /** 중지하면 바로 끊기는 대기 */
@@ -127,6 +152,11 @@ export class Runner extends EventEmitter {
     list = list.filter((r) => r.rowNumber >= this.options.startRow);
     if (this.options.maxRows) list = list.slice(0, this.options.maxRows);
     if (!list.length) throw new Error(`시작 행(${this.options.startRow})부터 실행할 행이 없습니다 (엑셀 ${rows.length}행).`);
+    if (this.rowCap && list.length > this.rowCap) {
+      // 세트가 정한 한 번에 실행할 행 수: 넘는 행은 이번에 실행하지 않는다
+      this.limit = { maxRowsPerRun: this.rowCap, nextRow: list[this.rowCap].rowNumber, skipped: list.length - this.rowCap };
+      list = list.slice(0, this.rowCap);
+    }
     return { headers, list, excel: this.excelPath ? { file: path.basename(this.excelPath), headers, rowCount: rows.length } : null };
   }
 
@@ -166,6 +196,11 @@ export class Runner extends EventEmitter {
       });
       const version = await browserVersion(this.ctx);
       this.log('info', `브라우저: ${this.ctx.__channel}${version ? ` (${version})` : ''}`);
+      if (this.siteLimit) {
+        await guardSites(this.ctx, this.siteLimit, (e) => this.onSiteBlocked(e));
+        this.log('info', `세트 사이트 제한: ${this.siteLimit.join(', ') || '(없음)'} 밖으로는 이동하지 않습니다.`);
+      }
+      if (this.rowGapMs || this.rowCap) this.log('info', `세트 실행 간격: 행 사이 ${this.rowGapMs / 1000}초 이상${this.rowCap ? `, 한 번에 최대 ${this.rowCap}행` : ''}`);
       this.sess = new Session({ ctx: this.ctx, log: (level, m) => this.log(level, m) });
       this.sess.aborted = this.stopRequested;
       await this.sess.init();
@@ -178,17 +213,30 @@ export class Runner extends EventEmitter {
           step: (e) => this.onStep(e),
         },
       });
+      let lastEnd = 0;
+      let cut = false;
       for (const row of plan.list) {
         if (this.stopRequested) break;
+        if (this.rowGapMs && lastEnd) {
+          const wait = lastEnd + this.rowGapMs - Date.now();
+          if (wait > 0) await this.sleep(wait);
+        }
         const result = await this.runRow(row);
+        lastEnd = Date.now();
         report.rows.push(result);
         report.files.push(...result.files);
         const failed = report.rows.filter((r) => r.status === 'failed').length;
         this.emit('progress', { rowsTotal: plan.list.length, rowsDone: report.rows.length, rowsFailed: failed });
         if (result.status === 'failed' && this.options.onRowError === 'stop' && !this.stopRequested) {
           this.log('warn', '행이 실패해 실행을 멈춥니다 (행 실패 시 중단).');
+          cut = true;
           break;
         }
+      }
+      if (this.limit && !cut && !this.stopRequested) {
+        report.limit = this.limit;
+        report.error = `이 세트는 한 번에 ${this.limit.maxRowsPerRun}행까지만 실행합니다 — ${this.limit.nextRow}행부터 ${this.limit.skipped}행은 실행하지 않았습니다. 시작 행을 ${this.limit.nextRow}(으)로 정해 이어서 실행하세요.`;
+        this.log('warn', report.error);
       }
     } catch (e) {
       if (!(e instanceof StopSignal)) {
@@ -201,7 +249,7 @@ export class Runner extends EventEmitter {
       await this.ctx?.close().catch(() => {});
       const ok = report.rows.filter((r) => r.status === 'ok').length;
       report.totals = { rows: report.rows.length, ok, failed: report.rows.length - ok };
-      report.status = this.stopRequested ? 'stopped' : fatal || report.totals.failed ? 'failed' : 'done';
+      report.status = this.stopRequested ? 'stopped' : fatal || report.totals.failed ? 'failed' : report.limit ? 'stopped' : 'done';
       const endedAt = new Date();
       report.endedAt = endedAt.toISOString();
       report.durationMs = endedAt - startedAt;
@@ -217,8 +265,10 @@ export class Runner extends EventEmitter {
   }
 
   onStep(e) {
-    if (e.status === 'start') this.log('info', `  ${e.block === (this.recipe.entryBlock || 'main') ? '' : `[${e.block}] `}${e.index + 1}. ${e.desc}`);
-    else if (e.status === 'ok' && e.note) this.log('info', `     → ${e.note}`);
+    if (e.status === 'start') {
+      this.lastStep = { stepId: e.stepId, block: e.block, index: e.index, desc: e.desc };
+      this.log('info', `  ${e.block === (this.recipe.entryBlock || 'main') ? '' : `[${e.block}] `}${e.index + 1}. ${e.desc}`);
+    } else if (e.status === 'ok' && e.note) this.log('info', `     → ${e.note}`);
     this.emit('step', e);
   }
 
@@ -251,9 +301,14 @@ export class Runner extends EventEmitter {
     };
     try {
       await this.sess.resetRow();
+      this.rowBlocked = null;
+      this.lastStep = null;
       await this.executor.runRow(rc);
+      if (this.rowBlocked) throw this.blockedError();
       this.log('info', `${rowNumber}행 성공 (${((Date.now() - t0) / 1000).toFixed(1)}초)`);
-    } catch (e) {
+    } catch (e0) {
+      // 세트 밖 사이트로 가다 막혔으면, 그 때문에 난 스텝 오류(주소를 열지 못함 등) 대신 막은 이유를 남긴다
+      const e = this.rowBlocked && !e0.stop ? Object.assign(this.blockedError(), { failure: e0.failure ?? this.lastStep ?? undefined }) : e0;
       result.status = 'failed';
       result.error = e.stop ? '사용자가 실행을 중지했습니다.' : firstLine(e.message);
       if (e.failure) result.failure = e.failure;

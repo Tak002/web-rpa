@@ -16,6 +16,8 @@ import { recipeProblems, excelColumnsOf, promptVariablesOf, autoLinkExcel } from
 import { Settings } from './settings.js';
 import { startBrowser, profileNameFor } from './browser.js';
 import { AgentSession } from './ai/agent.js';
+import { setDraft, buildSet, inspectSet, publicPreview, installSet, installedSets, readSet, ENGINE_VERSION } from './set/index.js';
+import { hubList, hubReadme, resolveHubSet, downloadHubSet } from './set/hub.js';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -37,6 +39,7 @@ function browserTarget() {
   return { browser, profileDir: path.join(store.root, 'profiles', profileNameFor(browser.id)) };
 }
 
+const SET_BODY_LIMIT = 4 * 1024 * 1024; // .wrset 은 2MB 까지
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.pdf': 'application/pdf', '.json': 'application/json; charset=utf-8', '.txt': 'text/plain; charset=utf-8', '.csv': 'text/csv; charset=utf-8', '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', '.webm': 'video/webm' };
 
 // ---------- 상태 ----------
@@ -87,7 +90,7 @@ async function readBody(req, limit = 25 * 1024 * 1024) {
   let size = 0;
   for await (const c of req) {
     size += c.length;
-    if (size > limit) throw new HttpError(413, '파일이 너무 큽니다 (25MB 제한).');
+    if (size > limit) throw new HttpError(413, `파일이 너무 큽니다 (${Math.round(limit / 1024 / 1024)}MB 제한).`);
     chunks.push(c);
   }
   return Buffer.concat(chunks);
@@ -182,6 +185,71 @@ route('POST', '/api/uploads', async ({ req, url }) => {
   return excelPreview(id);
 });
 route('GET', '/api/uploads/:id', ({ p }) => excelPreview(decodeURIComponent(p.id)));
+
+// ---------- 진행 세트 (.wrset) ----------
+/** 이 레시피의 가장 최근 성공 행이 있는 실행 리포트 (기대 결과 초안용) */
+async function lastGoodRun(recipeId) {
+  for (const r of await store.listRuns()) {
+    if (r.recipe?.id !== recipeId || !r.totals?.ok) continue;
+    return store.getRun(r.runId).catch(() => null);
+  }
+  return null;
+}
+/** 설치 상태를 붙인 미리보기 */
+async function previewWithInstall(p, extra = {}) {
+  const inst = p.id ? (await installedSets(store))[p.id] : null;
+  return { ...publicPreview(p), installed: inst ? { version: inst.version, recipeId: inst.recipeId, uploadId: inst.uploadId, sha256: inst.sha256 } : null, ...extra };
+}
+
+route('GET', '/api/recipes/:id/set-draft', async ({ p }) => {
+  const recipe = await store.getRecipe(p.id);
+  return setDraft(recipe, { runReport: await lastGoodRun(recipe.id) });
+});
+route('POST', '/api/recipes/:id/set', async ({ req, p, res }) => {
+  const body = await readJson(req);
+  const recipe = await store.getRecipe(p.id);
+  const built = buildSet(recipe, body);
+  const { errors, warnings } = built.lint;
+  if (body.check) return { ok: !errors.length, errors, warnings, fileName: built.fileName, sha256: built.sha256, size: built.buffer.length, manifest: built.manifest, summary: built.summary };
+  if (errors.length) throw new HttpError(400, `세트로 내보낼 수 없습니다:\n- ${errors.join('\n- ')}`);
+  res.writeHead(200, {
+    'content-type': 'application/zip',
+    'content-length': built.buffer.length,
+    'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(built.fileName)}`,
+    'cache-control': 'no-store',
+    'x-wrset-sha256': built.sha256,
+  });
+  res.end(built.buffer);
+  return undefined;
+});
+route('POST', '/api/sets/preview', async ({ req }) => previewWithInstall(inspectSet(await readBody(req, SET_BODY_LIMIT)), { verified: 'file' }));
+route('POST', '/api/sets/install', async ({ req }) => {
+  const buf = await readBody(req, SET_BODY_LIMIT);
+  readSet(buf); // 형식이 아니면 400
+  return installSet(store, buf, { source: 'file' });
+});
+route('GET', '/api/sets/installed', () => installedSets(store));
+
+// ---------- 공개 허브 ----------
+route('GET', '/api/hub', async ({ url }) => hubList(settings.hubSources, await installedSets(store), { refresh: url.searchParams.get('refresh') === '1' }));
+route('GET', '/api/hub/readme', async ({ url }) => ({ text: await hubReadme(settings.hubSources, { source: url.searchParams.get('source'), id: url.searchParams.get('id') }) }));
+/** 허브 세트 내려받기 + sha256·엔진 범위 확인 */
+async function hubFetch(body) {
+  const { src, set, entry } = await resolveHubSet(settings.hubSources, { source: body.source, id: body.id, version: body.version || undefined });
+  const buf = await downloadHubSet(entry);
+  const p = inspectSet(buf);
+  if (p.id !== set.id || p.version !== entry.version) p.errors.push(`허브 목록(${set.id} ${entry.version})과 세트 안의 manifest(${p.id} ${p.version})가 다릅니다.`);
+  return { src, set, entry, buf, p };
+}
+route('POST', '/api/hub/preview', async ({ req }) => {
+  const { src, entry, p } = await hubFetch(await readJson(req));
+  return previewWithInstall(p, { verified: 'hub', hub: { source: src.url, sourceName: src.name, version: entry.version, sha256: entry.sha256, url: entry.url, engine: entry.engine, verified: entry.verified } });
+});
+route('POST', '/api/hub/install', async ({ req }) => {
+  const { src, buf, p } = await hubFetch(await readJson(req));
+  if (p.errors.length) throw new HttpError(400, `설치할 수 없는 세트입니다:\n- ${p.errors.join('\n- ')}`);
+  return installSet(store, buf, { source: src.url });
+});
 
 // ---------- 녹화 ----------
 route('POST', '/api/record/start', async ({ req }) => {
@@ -432,7 +500,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`web-rpa 실행 중: http://${HOST}:${PORT}  (작업 폴더: ${store.root})`);
+  console.log(`web-rpa ${ENGINE_VERSION} 실행 중: http://${HOST}:${PORT}  (작업 폴더: ${store.root})`);
 });
 
 for (const sig of ['SIGINT', 'SIGTERM']) {

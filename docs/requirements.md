@@ -244,7 +244,25 @@ AI 도우미가 "이 스텝까지 실행한 화면"을 보고 새 요소를 고�
 - `autoLinkExcel(recipe, headers, firstRow)` → `{ recipe(사본), linked: [{ stepId, column }] }`: 엑셀 첫 행 값과 똑같은 입력·선택 값을 `{{열}}` 로 바꾼다. 한 열에서만 일치할 때만. 원래 값은 `meta.recordedValue` 에 남기고, 필요한 excel 변수를 만든다.
 - `ensureExcelVariable(recipe, column)`.
 
-## 6. 합격 기준
+## 6. 진행 세트(.wrset)·허브 (0.2.0)
+
+| 파일 | 내보내는 것 |
+|---|---|
+| `src/set/core.mjs`, `src/set/zip.mjs` | 세트 규칙(정리·위험·개인정보·manifest·세트 검사·기대 결과 비교)과 결정적 zip. **허브 저장소 CI 와 같은 파일** — 함수 이름·인자를 바꾸지 않는다 |
+| `src/set/folder.mjs` | `readSetDir`, `packFiles`, `packSetDir`, `unpackSet` (의존성 없음, 허브 CI 도 쓸 수 있다) |
+| `src/set/index.js` | `ENGINE_VERSION`(package.json), `setDraft`, `buildSet`, `readSet`, `inspectSet`/`inspectFiles`, `publicPreview`, `installSet`, `installedSets`, `riskSummary`, `expectedDraft` |
+| `src/set/hub.js` | `checkHubUrl`, `normalizeIndex`, `fetchIndex`, `hubList`, `resolveHubSet`, `downloadHubSet`, `hubReadme` |
+| `src/engine/sites.js` | `guardSites(ctx, origins, onBlock)`, `normOrigin`, `siteAllowed` |
+| `src/cli.js` | 명령줄 (`set lint/pack/unpack/test/install`, `hub list/install`) |
+
+- 세트 파일 목록·manifest 형식은 `core.mjs` 의 `lintSet`·`manifestProblems` 가 기준이다. 크기 2MB 이하.
+- 허브 목록(`index.json`): `{ format: "web-rpa-hub-index", formatVersion: 1, generatedAt, hub: { name, url, repo }, sets: [{ id, name, summary, author, license, tags, latest, versions: [{ version, engine, url, sha256, size, publishedAt, risk, sites, columns, verified: { at, result } }], readme }] }`. `url`·`readme` 는 목록 주소 기준 상대 경로. 허브 주소는 https 만(이 PC 안의 시험 주소만 http).
+- 허브 설치 순서: 목록의 `engine` 범위 확인 → 내려받기 → 목록의 sha256 과 대조(다르면 설치하지 않음) → 세트 검사(manifest 의 엔진 범위·id·버전 포함) → 미리보기 → 설치.
+- 설치: 레시피에 `origin = { set, version, sha256, source, installedAt, sites, pacing }` 을 넣어 저장하고, `input/sample.csv` 를 올린 파일로, 원본 .wrset 을 `sets/packages/` 에, 설치 기록을 `sets/installed.json` 에 남긴다. 같은 세트는 같은 레시피를 바꾼다.
+- 실행기: `recipe.origin.sites` 가 있으면 업무 탭·팝업이 그 밖의 사이트로 이동하지 못하게 막고 그 행을 알아듣기 쉬운 문구로 실패시킨다(하위 자원·iframe·about:·data:·blob: 허용). `pacing.minRowIntervalMs` 만큼 행 사이를 쉬고, `pacing.maxRowsPerRun` 을 넘는 행은 실행하지 않고 멈춘다(`report.limit`, 상태 `stopped`). `origin` 이 없는 레시피는 전과 같다.
+- API: `GET /api/recipes/:id/set-draft`, `POST /api/recipes/:id/set`(`check: true` 면 검사 결과만), `POST /api/sets/preview`·`/api/sets/install`(본문 = .wrset), `GET /api/sets/installed`, `GET /api/hub[?refresh=1]`, `GET /api/hub/readme?source=&id=`, `POST /api/hub/preview`·`/api/hub/install`(`{ source, id, version? }` — source 는 설정에 있는 허브만).
+
+## 7. 합격 기준
 
 모두 통과해야 한다(Windows, Edge 설치됨):
 
@@ -256,6 +274,7 @@ node test/settings-check.mjs
 node test/lab.mjs            (숨김, 106개 검사)
 node test/lab.mjs --headed   (화면 표시 — PC 화면에 Edge 창이 뜬다)
 node test/headed-check.mjs
+node test/set-check.mjs      (진행 세트·허브)
 ```
 
 시험 코드는 동작을 확인하는 기준이므로 고치지 않는다. 시험이 틀렸다고 판단되면 고치지 말고 이유를 보고한다.

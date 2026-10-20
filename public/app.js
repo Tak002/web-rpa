@@ -141,7 +141,7 @@ function route() {
   for (const a of document.querySelectorAll('#nav a')) a.classList.toggle('active', a.dataset.nav === (section === 'recipe' ? 'recipes' : section === 'report' ? 'reports' : section));
   app.replaceChildren();
   window.scrollTo(0, 0);
-  const pages = { recipes: recipesPage, record: recordPage, recipe: () => editorPage(parts[1]), run: () => runPage(params), reports: reportsPage, report: () => reportPage(parts[1]), settings: settingsPage };
+  const pages = { recipes: recipesPage, record: recordPage, recipe: () => editorPage(parts[1]), run: () => runPage(params), reports: reportsPage, report: () => reportPage(parts[1]), hub: () => hubPage(params), settings: settingsPage };
   (pages[section] ?? recipesPage)();
 }
 window.addEventListener('hashchange', route);
@@ -182,7 +182,7 @@ async function recipesPage() {
     h(
       'tr',
       null,
-      h('td', null, h('a', { href: `#/recipe/${r.id}` }, h('b', null, r.name)), h('div', { class: 'muted small', style: 'overflow-wrap:anywhere' }, r.startUrl)),
+      h('td', null, h('a', { href: `#/recipe/${r.id}` }, h('b', null, r.name)), r.set ? h('span', { class: 'badge acc', style: 'margin-left:6px', title: `허브 세트 ${r.set.id}` }, `세트 v${r.set.version}`) : null, h('div', { class: 'muted small', style: 'overflow-wrap:anywhere' }, r.startUrl)),
       h('td', null, h('span', { class: 'badge' }, `${r.steps}스텝`)),
       h('td', null, r.excelColumns.length ? r.excelColumns.map((c) => h('span', { class: 'badge acc', style: 'margin:0 4px 4px 0' }, c)) : h('span', { class: 'muted small' }, '엑셀 없음')),
       h('td', { class: 'muted small' }, fmtTime(r.updatedAt)),
@@ -448,6 +448,20 @@ async function editorPage(id) {
           {
             onclick: async () => {
               if (dirty) {
+                if (!confirm('저장하지 않은 변경이 있습니다. 저장한 뒤 세트로 내보낼까요?')) return;
+                await save();
+                if (dirty) return; // 저장 실패
+              }
+              openSetWizard(recipe.id);
+            },
+          },
+          '세트로 내보내기',
+        ),
+        h(
+          'button',
+          {
+            onclick: async () => {
+              if (dirty) {
                 if (!confirm('저장하지 않은 변경이 있습니다. 저장하고 실행 화면으로 갈까요?')) return;
                 await save();
                 if (dirty) return; // 저장 실패
@@ -461,6 +475,7 @@ async function editorPage(id) {
       ),
       h('div', { class: 'card grid2' }, h('label', { class: 'field' }, h('span', null, '레시피 이름'), nameIn), h('label', { class: 'field' }, h('span', null, '시작 주소'), urlIn)),
       problems.length ? h('div', { class: 'notice warn' }, h('b', null, '실행 전에 고칠 점'), h('ul', null, problems.map((p) => h('li', null, p)))) : null,
+      recipe.origin ? h('div', { class: 'notice info small' }, setLimitText(recipe.origin), ' 제한은 JSON 탭의 origin 에 있습니다.') : null,
       h(
         'div',
         { class: 'tabs' },
@@ -1130,6 +1145,7 @@ async function runPage(params) {
   add(app, head, livePanel, setup);
 
   let selected = params.get('recipe') || localStorage.getItem('rpa:lastRecipe') || recipes[0]?.id;
+  const presetUpload = params.get('recipe') && params.get('upload'); // 세트 [예시로 실행]: 설치한 예시 입력을 골라 둔다
   let detail = null;
   let upload = null;
   const values = {};
@@ -1237,6 +1253,7 @@ async function runPage(params) {
           ? h(
               'div',
               { class: 'row small muted' },
+              detail.recipe.origin ? h('span', { class: 'badge acc' }, `세트 v${detail.recipe.origin.version}`) : null,
               `${Object.values(detail.recipe.blocks).flat().length}스텝`,
               ' · ',
               h('a', { href: `#/recipe/${selected}` }, '편집'),
@@ -1244,6 +1261,7 @@ async function runPage(params) {
             )
           : null,
         detail?.problems.length ? h('div', { class: 'notice warn' }, h('ul', null, detail.problems.map((p) => h('li', null, p)))) : null,
+        detail?.recipe.origin ? h('div', { class: 'small muted' }, setLimitText(detail.recipe.origin)) : null,
       ),
       h(
         'div',
@@ -1342,6 +1360,7 @@ async function runPage(params) {
   const field2 = (label, input) => h('label', { class: 'field' }, h('span', null, label), input);
 
   drawLive();
+  if (presetUpload) upload = await api('GET', `/api/uploads/${encodeURIComponent(presetUpload)}`).catch((e) => (toast(`예시 입력을 찾지 못했습니다: ${e.message}`, 'error'), null));
   await loadDetail();
   cleanup = onLive((type) => {
     if (type.startsWith('run-') || type === 'state') drawLive();
@@ -1488,7 +1507,7 @@ async function settingsPage() {
   const draw = async () => {
     const s = await api('GET', '/api/settings').catch((e) => (toast(e.message, 'error'), null));
     if (!s) return;
-    mount(box, browserCard(s.browser, draw), aiCard(s.openrouter, draw));
+    mount(box, browserCard(s.browser, draw), hubSourcesCard(s, draw), aiCard(s.openrouter, draw));
   };
   await draw();
 }
@@ -1610,6 +1629,782 @@ function aiCard(o, redraw) {
             '키 지우기',
           )
         : null,
+    ),
+  );
+}
+
+// =====================================================================
+// 진행 세트·허브 공용 조각
+// =====================================================================
+const RISK = { submit: ['제출·결제', 'bad'], download: ['파일 저장', 'acc'], upload: ['파일 첨부', 'warn'], login: ['로그인', 'warn'], 'insecure-http': ['암호화 안 된 사이트', 'bad'], 'var-in-url': ['주소에 변수', 'warn'] };
+const riskBadge = (f) => h('span', { class: `badge ${RISK[f]?.[1] ?? ''}` }, RISK[f]?.[0] ?? f);
+const riskBadges = (flags) => (flags ?? []).map(riskBadge);
+const hostOf = (o) => {
+  try {
+    const u = new URL(o);
+    return u.protocol === 'http:' ? u.origin : u.host;
+  } catch {
+    return String(o ?? '');
+  }
+};
+const SET_ID_RE = /^[a-z0-9][a-z0-9-]*\/[a-z0-9][a-z0-9-]*$/;
+const HUB_REPO = 'https://github.com/Tak002/web-rpa-hub';
+
+/** 설치한 세트 레시피의 제한 안내 한 줄 */
+function setLimitText(o) {
+  const sites = (o.sites ?? []).map(hostOf).join(', ') || '(없음)';
+  const p = o.pacing ?? {};
+  return `세트 ${o.set} v${o.version} 에서 설치한 레시피입니다. 실행할 때 ${sites} 에만 접속하고, 행 사이 ${(Number(p.minRowIntervalMs) || 0) / 1000}초 이상 쉬며 한 번에 최대 ${p.maxRowsPerRun ?? '-'}행까지 실행합니다.`;
+}
+
+// ---------- 마크다운 (README): 제목·목록·문단·코드만. 글자는 모두 텍스트 노드로 넣어 HTML 로 해석되지 않는다 ----------
+function mdInline(text) {
+  const out = [];
+  const re = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\[([^\]]+)\]\((https?:\/\/[^\s)]+)\))/g;
+  let last = 0;
+  let m;
+  while ((m = re.exec(text))) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    if (m[1]) out.push(h('code', null, m[1].slice(1, -1)));
+    else if (m[2]) out.push(h('b', null, m[2].slice(2, -2)));
+    else out.push(h('a', { href: m[5], target: '_blank', rel: 'noopener noreferrer' }, m[4]));
+    last = re.lastIndex;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+function renderMarkdown(src) {
+  const box = h('div', { class: 'md' });
+  const lines = String(src ?? '').replace(/\r\n?/g, '\n').split('\n');
+  const LIST = /^\s*([-*+]|\d+[.)])\s+/;
+  let para = [];
+  const flush = () => {
+    if (para.length) add(box, h('p', null, mdInline(para.join(' '))));
+    para = [];
+  };
+  for (let i = 0; i < lines.length; ) {
+    const line = lines[i];
+    if (/^\s*```/.test(line)) {
+      flush();
+      const code = [];
+      for (i += 1; i < lines.length && !/^\s*```/.test(lines[i]); i += 1) code.push(lines[i]);
+      add(box, h('pre', null, h('code', null, code.join('\n'))));
+      i += 1;
+      continue;
+    }
+    const hm = /^(#{1,6})\s+(.*)$/.exec(line);
+    if (hm) {
+      flush();
+      add(box, h(`h${Math.min(hm[1].length + 1, 6)}`, null, mdInline(hm[2].replace(/\s+#+\s*$/, '')))); // 페이지 제목(h1) 아래로 한 단계씩 내린다
+      i += 1;
+      continue;
+    }
+    if (LIST.test(line)) {
+      flush();
+      const list = h(/^\s*\d/.test(line) ? 'ol' : 'ul');
+      for (; i < lines.length && LIST.test(lines[i]); i += 1) add(list, h('li', null, mdInline(lines[i].replace(LIST, ''))));
+      add(box, list);
+      continue;
+    }
+    if (!line.trim()) flush();
+    else para.push(line.trim());
+    i += 1;
+  }
+  flush();
+  return box;
+}
+
+/** 세트 안 내용: 사이트·엑셀 열·입력값·첨부·위험·예시 */
+function setDetailSections(p) {
+  const table = (head, rows) => h('div', { class: 'table-wrap' }, h('table', null, h('thead', null, h('tr', null, head.map((x) => h('th', null, x)))), h('tbody', null, rows)));
+  return h(
+    'div',
+    { class: 'set-details' },
+    h('h3', null, '접속하는 사이트'),
+    h(
+      'ul',
+      null,
+      p.sites.map((s) =>
+        h('li', null, h('b', null, hostOf(s.origin)), s.purpose ? ` — ${s.purpose}` : '', s.login === 'required' ? h('span', { class: 'badge warn', style: 'margin-left:6px' }, '로그인 필요') : null, s.used === false ? h('span', { class: 'muted small' }, ' (레시피 밖 주소 — 다운로드 등)') : null),
+      ),
+    ),
+    h('h3', null, '엑셀 열'),
+    p.columns.length
+      ? table(
+          ['열', '설명', '예'],
+          p.columns.map((c) => h('tr', null, h('td', null, h('b', null, c.name), c.required === false ? h('span', { class: 'muted small' }, ' (선택)') : null), h('td', null, c.help || ''), h('td', null, c.example || ''))),
+        )
+      : h('p', { class: 'muted small', style: 'margin:0' }, '엑셀 없이 한 번 실행합니다.'),
+    p.prompts.length ? [h('h3', null, '실행할 때 넣는 값'), h('ul', null, p.prompts.map((x) => h('li', null, x.name, x.secret ? ' (비밀값 — 저장하지 않음)' : '')))] : null,
+    p.attachments.length ? [h('h3', null, '첨부할 파일'), h('p', { class: 'muted small', style: 'margin:0' }, '설치한 뒤 편집 화면에서 첨부 파일 경로를 정해야 실행할 수 있습니다.'), h('ul', null, p.attachments.map((a) => h('li', null, a.where, a.help ? ` — ${a.help}` : '')))] : null,
+    h('h3', null, '주의할 동작'),
+    p.risks.length
+      ? h('ul', { class: 'risk-list' }, p.risks.map((r) => h('li', null, riskBadge(r.flag), ' ', r.detail, r.where ? h('span', { class: 'muted small' }, ` (${r.where})`) : null)))
+      : h('p', { class: 'muted small', style: 'margin:0' }, '표시할 위험 동작이 없습니다.'),
+    p.sample?.rows?.length
+      ? [
+          h('h3', null, `예시 입력 (${p.sample.rows.length}행)`),
+          table(
+            p.sample.headers,
+            p.sample.rows.map((r) => h('tr', null, p.sample.headers.map((x) => h('td', null, r[x] ?? '')))),
+          ),
+        ]
+      : null,
+  );
+}
+
+/** 설치 결과: 레시피 열기 · 예시로 실행 */
+function installedView(r) {
+  return [
+    h('h2', null, `${r.updated ? '새 버전으로 바꿨습니다' : '설치했습니다'}: ${r.name} v${r.version}`),
+    r.updated ? h('p', { class: 'small muted', style: 'margin:0' }, `이전 버전(v${r.previousVersion})의 레시피는 작업 폴더 trash 에 보관했습니다.`) : null,
+    h('p', { class: 'small', style: 'margin:0' }, '먼저 세트에 들어 있는 예시 입력으로 실행해 결과를 확인해 보세요. 실행할 때 넣을 값(비밀번호 등)이 있으면 실행 화면에서 넣습니다. 이 레시피는 세트가 밝힌 사이트에만 접속합니다.'),
+    h('div', { class: 'row' }, h('a', { class: 'btn primary', href: `#/run?recipe=${encodeURIComponent(r.recipeId)}&upload=${encodeURIComponent(r.uploadId)}` }, '▶ 예시로 실행'), h('a', { class: 'btn', href: `#/recipe/${r.recipeId}` }, '레시피 열기')),
+    r.warnings?.length ? h('div', { class: 'notice warn small' }, h('ul', null, r.warnings.map((w) => h('li', null, w)))) : null,
+  ];
+}
+
+/**
+ * 가져오기 확인: sha256·엔진 확인, 하는 일 요약, 오류·경고, [설치].
+ * @param {object} p 미리보기 (/api/hub/preview, /api/sets/preview)
+ * @param {{install: () => Promise<object>, details?: boolean}} o
+ */
+function setImportCard(p, { install, details = false }) {
+  const card = h('div', { class: 'card stack set-import' });
+  const check = (ok, text) => h('li', { class: ok === true ? 'ok' : ok === false ? 'bad' : 'info' }, text);
+  const installBtn = h(
+    'button',
+    {
+      class: 'primary',
+      disabled: p.errors.length > 0,
+      onclick: safely(async () => {
+        installBtn.disabled = true;
+        installBtn.textContent = '설치 중…';
+        try {
+          mount(card, installedView(await install()));
+        } catch (e) {
+          installBtn.disabled = false;
+          installBtn.textContent = '설치';
+          throw e;
+        }
+      }),
+    },
+    p.installed ? (p.installed.version === p.version ? '다시 설치' : `v${p.version}(으)로 바꾸기`) : '설치',
+  );
+  mount(
+    card,
+    h('div', { class: 'row' }, h('h2', { style: 'margin:0' }, `가져오기 확인: ${p.name || '(이름 없음)'}`), p.version ? h('span', { class: 'badge' }, `v${p.version}`) : null, riskBadges(p.flags)),
+    h(
+      'ul',
+      { class: 'checks' },
+      p.verified === 'hub'
+        ? check(true, `내려받은 파일이 허브 목록의 sha256 과 같습니다 (${p.sha256.slice(0, 12)}…).`)
+        : check(null, `허브가 아닌 파일이라 비교할 sha256 이 없습니다. 믿을 수 있는 곳에서 받은 파일인지 확인하세요. (sha256 ${p.sha256?.slice(0, 12)}…)`),
+      p.engine.required ? check(p.engine.ok, p.engine.ok ? `지금 web-rpa ${p.engine.current} 에서 실행할 수 있습니다 (필요: ${p.engine.required}).` : `web-rpa ${p.engine.required} 가 필요합니다 (지금 ${p.engine.current}).`) : null,
+      p.manifest?.author?.name ? check(null, `만든 사람: ${p.manifest.author.name}${p.manifest.author.github ? ` (GitHub ${p.manifest.author.github})` : ''} · 라이선스 ${p.manifest.license ?? '-'}`) : null,
+    ),
+    p.summary?.length ? h('div', { class: 'notice info' }, p.summary.map((x) => h('div', null, x))) : null,
+    p.installed ? h('div', { class: 'small' }, `이미 v${p.installed.version} 이(가) 설치돼 있습니다. 설치하면 그 레시피를 이 버전으로 바꿉니다 (이전 레시피는 작업 폴더 trash 에 보관).`) : null,
+    p.errors.length ? h('div', { class: 'notice bad' }, h('b', null, '설치할 수 없습니다'), h('ul', null, p.errors.map((e) => h('li', null, e)))) : null,
+    p.warnings.length ? h('div', { class: 'notice warn' }, h('b', null, '확인할 점'), h('ul', null, p.warnings.map((e) => h('li', null, e)))) : null,
+    details ? setDetailSections(p) : null,
+    details && p.readme ? h('details', null, h('summary', null, '설명(README) 보기'), renderMarkdown(p.readme)) : null,
+    h('div', { class: 'row' }, installBtn, h('span', { class: 'muted small' }, '설치하면 레시피와 예시 입력이 추가됩니다. 실행은 직접 시작해야 합니다.')),
+  );
+  return card;
+}
+
+/** [세트 파일 가져오기]: .wrset 고르기 → 미리보기 → 설치 */
+function setFilePicker(box) {
+  return h('input', {
+    type: 'file',
+    accept: '.wrset',
+    style: 'display:none',
+    onchange: async (e) => {
+      const f = e.target.files[0];
+      e.target.value = '';
+      if (!f) return;
+      mount(box, h('div', { class: 'card muted' }, `${f.name} 확인 중…`));
+      try {
+        const p = await api('POST', '/api/sets/preview', f, { raw: true });
+        mount(box, setImportCard(p, { install: () => api('POST', '/api/sets/install', f, { raw: true }), details: true }));
+      } catch (err) {
+        mount(box, h('div', { class: 'notice bad' }, h('b', null, `${f.name}: 가져올 수 없습니다`), h('div', { style: 'white-space:pre-wrap' }, err.message)));
+      }
+      box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    },
+  });
+}
+
+// =====================================================================
+// 허브
+// =====================================================================
+async function hubPage(params) {
+  if (params.get('id')) return hubDetailPage(params);
+  const importBox = h('div');
+  const fileIn = setFilePicker(importBox);
+  const listBox = h('div', null, h('div', { class: 'card muted' }, '허브 목록을 불러오는 중…'));
+  const search = h('input', { type: 'text', placeholder: '이름·설명·태그·사이트·엑셀 열로 찾기', value: params.get('q') ?? '', 'aria-label': '세트 찾기', oninput: () => draw() });
+  let data = null;
+  add(
+    app,
+    h('div', { class: 'page-head' }, h('h1', null, '허브'), h('div', { class: 'spacer' }), fileIn, h('button', { onclick: () => fileIn.click() }, '세트 파일 가져오기'), h('button', { onclick: () => load(true) }, '새로 고침')),
+    h('p', { class: 'muted small', style: 'margin:-8px 0 14px' }, '다른 사람이 공개한 진행 세트(레시피 + 예시 입력 + 설명)를 찾아 가져옵니다. 가져오기 전에 접속하는 사이트와 하는 일을 꼭 확인하세요.'),
+    importBox,
+    h('div', { style: 'margin-bottom:12px' }, search),
+    listBox,
+  );
+
+  const haystack = (s) => [s.name, s.summary, s.id, s.author?.name, ...(s.tags ?? []), ...(s.entry?.sites ?? []), ...(s.entry?.columns ?? [])].join(' ').toLowerCase();
+
+  function draw() {
+    if (!data) return;
+    const failed = data.sources.filter((x) => !x.ok);
+    const words = search.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const sets = data.sets.filter((s) => words.every((w) => haystack(s).includes(w)));
+    const notes = failed.length && failed.length < data.sources.length ? failed.map((x) => h('div', { class: 'notice warn small' }, `${x.name} 에 연결하지 못했습니다: ${x.error}`)) : null;
+    let body;
+    if (data.error) body = h('div', { class: 'card empty' }, h('h2', null, '허브 목록을 불러오지 못했습니다'), h('p', null, data.error));
+    else if (!data.sources.length) body = h('div', { class: 'card empty' }, h('h2', null, '허브 주소가 없습니다'), h('p', null, '설정 → 허브에서 허브 주소를 넣거나, 받아 둔 세트 파일(.wrset)을 [세트 파일 가져오기]로 설치하세요.'), h('a', { class: 'btn', href: '#/settings' }, '설정 열기'));
+    else if (failed.length === data.sources.length)
+      body = h(
+        'div',
+        { class: 'card empty' },
+        h('h2', null, '허브에 연결하지 못했습니다'),
+        h('p', null, '인터넷 연결이나 설정의 허브 주소를 확인한 뒤 [새로 고침]을 눌러 주세요. 받아 둔 세트 파일(.wrset)이 있으면 [세트 파일 가져오기]로 설치할 수 있습니다.'),
+        h('ul', { class: 'small', style: 'display:inline-block;text-align:left' }, failed.map((x) => h('li', null, `${x.name}: ${x.error}`))),
+      );
+    else if (!data.sets.length) body = h('div', { class: 'card empty' }, '아직 올라온 세트가 없습니다.');
+    else if (!sets.length) body = h('div', { class: 'card empty' }, `"${search.value.trim()}" 에 맞는 세트가 없습니다.`);
+    else body = h('div', { class: 'hub-grid' }, sets.map(hubSetCard));
+    mount(listBox, notes, body);
+  }
+
+  async function load(refresh) {
+    mount(listBox, h('div', { class: 'card muted' }, '허브 목록을 불러오는 중…'));
+    try {
+      data = await api('GET', `/api/hub${refresh ? '?refresh=1' : ''}`);
+    } catch (e) {
+      data = { sources: [], sets: [], error: e.message };
+    }
+    draw();
+  }
+  await load(false);
+}
+
+function hubSetCard(s) {
+  const v = s.entry;
+  const meta = [s.author?.name, v.verified?.at ? `마지막 확인 ${v.verified.at}${v.verified.result ? ` (${v.verified.result})` : ''}` : '', s.tags?.length ? s.tags.map((t) => `#${t}`).join(' ') : ''].filter(Boolean).join(' · ');
+  return h(
+    'a',
+    { class: 'card hub-card', href: `#/hub?source=${encodeURIComponent(s.source)}&id=${encodeURIComponent(s.id)}` },
+    h(
+      'div',
+      { class: 'row' },
+      h('b', { class: 'hub-name' }, s.name),
+      h('span', { class: 'badge' }, `v${v.version}`),
+      s.installed ? h('span', { class: `badge ${s.update ? 'warn' : 'ok'}` }, s.update ? `업데이트 있음 (설치 v${s.installed.version})` : '설치됨') : null,
+      v.compatible ? null : h('span', { class: 'badge bad' }, '이 web-rpa 와 안 맞음'),
+    ),
+    s.summary ? h('div', { class: 'small hub-summary' }, s.summary) : null,
+    h('div', { class: 'small muted hub-summary' }, '사이트: ', v.sites.map(hostOf).join(', ') || '-'),
+    v.columns.length ? h('div', { class: 'small muted hub-summary' }, '엑셀 열: ', v.columns.join(', ')) : null,
+    v.risk.length ? h('div', { class: 'row' }, riskBadges(v.risk)) : null,
+    meta ? h('div', { class: 'small muted hub-summary' }, meta) : null,
+  );
+}
+
+async function hubDetailPage(params) {
+  const source = params.get('source');
+  const id = params.get('id');
+  add(app, h('div', { class: 'page-head' }, h('a', { href: '#/hub', class: 'muted' }, '← 허브')));
+  let data;
+  try {
+    data = await api('GET', '/api/hub');
+  } catch (e) {
+    add(app, h('div', { class: 'notice bad' }, e.message));
+    return;
+  }
+  const s = data.sets.find((x) => x.id === id && (!source || x.source === source));
+  if (!s) {
+    const failed = data.sources.filter((x) => !x.ok);
+    add(app, h('div', { class: 'card empty' }, `허브에서 ${id} 세트를 찾지 못했습니다.${failed.length ? ` (${failed.map((x) => `${x.name}: ${x.error}`).join(' / ')})` : ''}`));
+    return;
+  }
+  let version = params.get('version') || s.entry.version;
+  let preview = null;
+  let previewErr = null;
+  let pending = null;
+  const confirmBox = h('div');
+  const infoBox = h('div');
+  const readmeBox = h('div', { class: 'card' }, h('div', { class: 'muted small' }, '설명을 불러오는 중…'));
+  const verSel = h(
+    'select',
+    { style: 'width:auto', 'aria-label': '버전', onchange: (e) => ((version = e.target.value), mount(confirmBox), loadPreview()) },
+    s.versions.map((v) => h('option', { value: v.version, selected: v.version === version }, `v${v.version}${v.version === s.latest ? ' · 최신' : ''}${v.compatible ? '' : ' · 이 web-rpa 와 안 맞음'}`)),
+  );
+  const entry = () => s.versions.find((v) => v.version === version) ?? s.entry;
+  add(
+    app,
+    h(
+      'div',
+      { class: 'card stack' },
+      h('div', { class: 'row' }, h('h1', { style: 'overflow-wrap:anywhere' }, s.name), s.installed ? h('span', { class: `badge ${s.update ? 'warn' : 'ok'}` }, s.update ? `업데이트 있음 (설치 v${s.installed.version})` : `설치됨 v${s.installed.version}`) : null),
+      s.summary ? h('p', { style: 'margin:0' }, s.summary) : null,
+      h('div', { class: 'small muted', style: 'overflow-wrap:anywhere' }, [s.id, s.author?.name ? `만든 사람 ${s.author.name}` : '', s.license ? `라이선스 ${s.license}` : '', s.sourceName].filter(Boolean).join(' · ')),
+      h('div', { class: 'row' }, riskBadges(entry().risk), entry().verified?.at ? h('span', { class: 'small muted' }, `마지막 확인 ${entry().verified.at}${entry().verified.result ? ` (${entry().verified.result})` : ''}`) : null),
+      h(
+        'div',
+        { class: 'row' },
+        h('span', { class: 'muted small' }, '버전'),
+        verSel,
+        h('button', { class: 'primary', onclick: () => showConfirm() }, '가져오기'),
+        s.installed ? h('a', { class: 'btn', href: `#/recipe/${s.installed.recipeId}` }, '설치한 레시피 열기') : null,
+      ),
+    ),
+    confirmBox,
+    infoBox,
+    readmeBox,
+  );
+
+  function loadPreview() {
+    const want = version;
+    preview = null;
+    previewErr = null;
+    mount(infoBox, h('div', { class: 'card muted small' }, '세트를 내려받아 확인하는 중…'));
+    pending = api('POST', '/api/hub/preview', { source: s.source, id: s.id, version: want }).then(
+      (p) => want === version && (preview = p),
+      (e) => want === version && (previewErr = e.message),
+    );
+    pending.then(() => {
+      if (want !== version) return;
+      if (previewErr) mount(infoBox, h('div', { class: 'notice bad' }, h('b', null, '세트를 확인하지 못했습니다'), h('div', { style: 'white-space:pre-wrap' }, previewErr)));
+      else mount(infoBox, h('div', { class: 'card' }, setDetailSections(preview)));
+    });
+  }
+
+  async function showConfirm() {
+    if (!preview && !previewErr) mount(confirmBox, h('div', { class: 'card muted small' }, '세트를 내려받아 확인하는 중…'));
+    await pending;
+    if (previewErr) mount(confirmBox, h('div', { class: 'notice bad' }, h('b', null, '가져올 수 없습니다'), h('div', { style: 'white-space:pre-wrap' }, previewErr)));
+    else if (preview) mount(confirmBox, setImportCard(preview, { install: () => api('POST', '/api/hub/install', { source: s.source, id: s.id, version: preview.version }) }));
+    confirmBox.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  api('GET', `/api/hub/readme?source=${encodeURIComponent(s.source)}&id=${encodeURIComponent(s.id)}`).then(
+    (r) => mount(readmeBox, r.text ? renderMarkdown(r.text) : h('p', { class: 'muted', style: 'margin:0' }, '설명(README)이 없습니다.')),
+    (e) => mount(readmeBox, h('div', { class: 'muted small' }, `설명을 불러오지 못했습니다: ${e.message}`)),
+  );
+  loadPreview();
+}
+
+// =====================================================================
+// 세트로 내보내기 (편집기에서 여는 마법사)
+// =====================================================================
+async function openSetWizard(recipeId) {
+  let draft;
+  try {
+    draft = await api('GET', `/api/recipes/${recipeId}/set-draft`);
+  } catch (e) {
+    toast(e.message, 'error');
+    return;
+  }
+  let saved = {};
+  try {
+    saved = JSON.parse(localStorage.getItem('rpa:setAuthor') || '{}');
+  } catch {
+    /* 저장 불가 환경 */
+  }
+  const slug = (s) =>
+    String(s ?? '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '');
+  const m = draft.manifest;
+  const st = {
+    step: 0,
+    idTouched: false,
+    info: { name: m.name, summary: '', id: '', version: '1.0.0', author: saved.name ?? '', github: saved.github ?? '', license: m.license, tags: '', description: '' },
+    sites: m.sites.map((x) => ({ origin: x.origin, purpose: '', login: x.login, extra: false })),
+    columns: m.columns.map((c) => ({ name: c.name, help: '', example: '' })),
+    attachments: m.attachments.map((a) => ({ where: a.where, help: '' })),
+    decisions: {},
+    rows: [],
+    expectedText: '',
+    check: null,
+  };
+  const autoId = () => `${slug(st.info.github) || 'me'}/${slug(st.info.name) || 'set'}`;
+  st.info.id = autoId();
+  const headers = st.columns.length ? st.columns.map((c) => c.name) : ['메모'];
+  const STEPS = ['정보', '정리 검토', '예시 입력', '기대 결과', '내려받기'];
+
+  const stepper = h('ol', { class: 'stepper' });
+  const body = h('div', { class: 'modal-body' });
+  const errBox = h('div');
+  const foot = h('div', { class: 'modal-foot row' });
+  const close = () => back.remove();
+  const back = h(
+    'div',
+    { class: 'modal-back' },
+    h(
+      'div',
+      { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': '세트로 내보내기' },
+      h('div', { class: 'row modal-head' }, h('h2', { style: 'margin:0' }, '세트로 내보내기'), h('div', { style: 'flex:1' }), h('button', { class: 'ghost icon', title: '닫기', onclick: () => confirm('내보내기를 그만둘까요? 적은 내용은 남지 않습니다.') && close() }, '✕')),
+      stepper,
+      body,
+      errBox,
+      foot,
+    ),
+  );
+  document.body.append(back);
+
+  const field = (label, input, hint) => h('label', { class: 'field' }, h('span', null, label), input, hint ? h('div', { class: 'muted small' }, hint) : null);
+  const text = (obj, key, { placeholder, after, area } = {}) =>
+    h(area ? 'textarea' : 'input', {
+      ...(area ? { rows: 3, style: 'min-height:64px' } : { type: 'text' }),
+      value: obj[key] ?? '',
+      placeholder,
+      oninput: (e) => {
+        obj[key] = e.target.value;
+        after?.(e);
+      },
+    });
+  const decisionsDone = () => draft.remaining.every((r) => st.decisions[r.id]);
+  const payload = () => ({
+    manifest: {
+      id: st.info.id.trim(),
+      name: st.info.name.trim(),
+      version: st.info.version.trim(),
+      summary: st.info.summary.trim(),
+      author: { name: st.info.author.trim(), github: st.info.github.trim() },
+      license: st.info.license.trim(),
+      tags: st.info.tags,
+      sites: st.sites.map(({ origin, purpose, login }) => ({ origin, purpose, login })),
+      columns: st.columns,
+      attachments: st.attachments,
+    },
+    decisions: st.decisions,
+    sampleRows: st.rows,
+    expected: st.expectedText.trim() ? JSON.parse(st.expectedText) : null,
+    description: st.info.description,
+    extraSites: st.sites.filter((x) => x.extra).map((x) => x.origin),
+  });
+
+  /** 다음으로 넘어가기 전 확인 → 문제 문장 배열 */
+  function problemsOf(step) {
+    const p = [];
+    if (step === 0) {
+      if (!st.info.name.trim()) p.push('세트 이름을 적어 주세요.');
+      if (st.info.summary.trim().length < 10) p.push('무엇을 하는지 10자 이상 적어 주세요.');
+      if (!st.info.author.trim()) p.push('만든 사람 이름을 적어 주세요.');
+      if (!SET_ID_RE.test(st.info.id.trim())) p.push('세트 id 는 "게시자/이름" 형식(영문 소문자·숫자·하이픈)이어야 합니다. 예: tak002/dart-report');
+      if (!/^\d+\.\d+\.\d+$/.test(st.info.version.trim())) p.push('버전은 1.0.0 처럼 숫자 세 자리로 적어 주세요.');
+      if (!st.sites.length) p.push('접속하는 사이트가 없습니다. 레시피에 이동 스텝이나 시작 주소가 있어야 합니다.');
+      for (const x of st.sites) if (!x.purpose.trim()) p.push(`${hostOf(x.origin)}: 이 사이트에서 하는 일을 적어 주세요.`);
+    }
+    if (step === 1 && !decisionsDone()) p.push(`남은 값 ${draft.remaining.filter((r) => !st.decisions[r.id]).length}개를 "그대로 둠" 또는 "지우기"로 정해 주세요.`);
+    if (step === 2 && !st.rows.some((r) => headers.some((c) => String(r[c] ?? '').trim()))) p.push('예시 행을 하나 이상 채워 주세요.');
+    if (step === 3 && st.expectedText.trim()) {
+      try {
+        const v = JSON.parse(st.expectedText);
+        if (!v || typeof v !== 'object' || Array.isArray(v)) p.push('기대 결과는 { … } 모양의 JSON 이어야 합니다.');
+      } catch (e) {
+        p.push(`기대 결과 JSON 오류: ${e.message}`);
+      }
+    }
+    return p;
+  }
+
+  function go(to) {
+    if (to > st.step) {
+      for (let s2 = st.step; s2 < to; s2 += 1) {
+        const p = problemsOf(s2);
+        if (p.length) {
+          st.step = s2;
+          draw();
+          mount(errBox, h('div', { class: 'notice warn' }, h('ul', null, p.map((x) => h('li', null, x)))));
+          return;
+        }
+      }
+    }
+    st.step = to;
+    draw();
+    back.scrollTop = 0;
+  }
+
+  function drawFoot() {
+    mount(
+      foot,
+      st.step > 0 ? h('button', { onclick: () => go(st.step - 1) }, '← 이전') : null,
+      h('div', { style: 'flex:1' }),
+      st.step < STEPS.length - 1 ? h('button', { class: 'primary', disabled: st.step === 1 && !decisionsDone(), onclick: () => go(st.step + 1) }, '다음 →') : h('button', { onclick: close }, '닫기'),
+    );
+  }
+
+  function draw() {
+    mount(errBox);
+    mount(
+      stepper,
+      STEPS.map((label, i) => h('li', { class: i === st.step ? 'active' : i < st.step ? 'done' : '', onclick: i < st.step ? () => go(i) : null }, `${i + 1}. ${label}`)),
+    );
+    mount(body, [infoStep, scrubStep, sampleStep, expectedStep, finishStep][st.step]());
+    drawFoot();
+  }
+
+  // ----- 1. 정보 -----
+  function infoStep() {
+    const idIn = text(st.info, 'id', { after: () => (st.idTouched = true) });
+    const syncId = () => {
+      if (!st.idTouched) idIn.value = st.info.id = autoId();
+    };
+    const sitesBox = h('div', { class: 'stack' });
+    const drawSites = () =>
+      mount(
+        sitesBox,
+        st.sites.map((x, i) =>
+          h(
+            'div',
+            { class: 'site-row' },
+            h('b', { style: 'overflow-wrap:anywhere' }, hostOf(x.origin)),
+            text(x, 'purpose', { placeholder: '이 사이트에서 하는 일 (예: 공시 목록에서 최신 보고서 찾기)' }),
+            h(
+              'div',
+              { class: 'row', style: 'flex-wrap:nowrap' },
+              h(
+                'select',
+                { style: 'width:auto', 'aria-label': '로그인', onchange: (e) => (x.login = e.target.value) },
+                [['none', '로그인 없음'], ['required', '로그인 필요'], ['optional', '로그인 선택']].map(([v, l]) => h('option', { value: v, selected: x.login === v }, l)),
+              ),
+              x.extra ? h('button', { class: 'sm danger', onclick: () => (st.sites.splice(i, 1), drawSites()) }, '빼기') : null,
+            ),
+          ),
+        ),
+      );
+    drawSites();
+    const extraIn = h('input', { type: 'text', placeholder: 'https://files.example.com (다운로드만 하는 다른 주소 등)' });
+    const addSite = () => {
+      let o;
+      try {
+        o = new URL(extraIn.value.trim()).origin;
+      } catch {
+        return toast('https:// 로 시작하는 주소를 넣어 주세요.', 'error');
+      }
+      if (!/^https?:/.test(o)) return toast('웹 주소만 넣을 수 있습니다.', 'error');
+      if (!st.sites.some((x) => x.origin === o)) st.sites.push({ origin: o, purpose: '', login: 'none', extra: true });
+      extraIn.value = '';
+      drawSites();
+    };
+    return [
+      draft.problems?.length ? h('div', { class: 'notice warn' }, h('b', null, '레시피에 고칠 점이 있어 세트 검사를 통과하지 못합니다. 편집기에서 먼저 고쳐 주세요.'), h('ul', null, draft.problems.map((x) => h('li', null, x)))) : null,
+      h('p', { class: 'muted small', style: 'margin:0' }, '레시피를 다른 사람이 쓸 수 있는 진행 세트(.wrset)로 묶습니다. 세트에는 정리한 레시피, 예시 입력, 설명이 들어가며 녹화 때 입력한 실제 값과 실행 결과는 넣지 않습니다.'),
+      h('div', { class: 'grid2' }, field('세트 이름', text(st.info, 'name', { after: syncId })), field('버전', text(st.info, 'version', { placeholder: '1.0.0' }))),
+      field('무엇을 하는지 (10자 이상)', text(st.info, 'summary', { area: true, placeholder: '예: DART 에서 회사마다 가장 최근 정기보고서를 찾아 PDF 로 저장합니다.' })),
+      h('div', { class: 'grid2' }, field('만든 사람 이름', text(st.info, 'author')), field('GitHub 아이디 (허브에 올릴 때)', text(st.info, 'github', { after: syncId }))),
+      h('div', { class: 'grid2' }, field('세트 id (게시자/이름)', idIn, '영문 소문자·숫자·하이픈. 허브에서 세트를 가리키는 이름입니다.'), field('라이선스', text(st.info, 'license'), 'CC0-1.0 은 누구나 조건 없이 쓸 수 있게 공개합니다.')),
+      field('태그 (쉼표로 나눔)', text(st.info, 'tags', { placeholder: '예: 공시, 세무, PDF' })),
+      h('h3', { style: 'margin:6px 0 0' }, '접속하는 사이트'),
+      h('p', { class: 'muted small', style: 'margin:0' }, '세트를 설치한 사람의 실행기는 여기 적은 사이트 밖으로 이동하지 않습니다.'),
+      sitesBox,
+      h('div', { class: 'row' }, h('div', { style: 'flex:1;min-width:200px' }, extraIn), h('button', { class: 'sm', onclick: addSite }, '＋ 사이트 추가')),
+      st.columns.length ? [h('h3', { style: 'margin:6px 0 0' }, '엑셀 열'), st.columns.map((c) => h('div', { class: 'col-row' }, h('b', { style: 'overflow-wrap:anywhere' }, c.name), text(c, 'help', { placeholder: '설명 (예: 상장회사 이름)' }), text(c, 'example', { placeholder: '예시 값 (공개 정보)' })))] : null,
+      st.attachments.length ? [h('h3', { style: 'margin:6px 0 0' }, '첨부할 파일'), st.attachments.map((a) => field(a.where, text(a, 'help', { placeholder: '어떤 파일을 첨부하는지' })))] : null,
+      field('자세한 설명 (선택 · README 에 들어갑니다)', text(st.info, 'description', { area: true })),
+    ];
+  }
+
+  // ----- 2. 정리 검토 -----
+  function scrubStep() {
+    const rows = draft.remaining.map((r, i) =>
+      h(
+        'div',
+        { class: 'decide' },
+        h('div', null, h('div', { class: 'small muted' }, `${r.where} · ${r.label}`), h('code', { style: 'overflow-wrap:anywhere' }, r.value)),
+        h(
+          'div',
+          { class: 'row', style: 'flex-wrap:nowrap' },
+          ['keep', 'clear']
+            .filter((d) => d === 'keep' || !r.id.endsWith(':target'))
+            .map((d) =>
+              h('label', { class: 'check' }, h('input', { type: 'radio', name: `dec-${i}`, value: d, checked: st.decisions[r.id] === d, onchange: () => ((st.decisions[r.id] = d), drawFoot()) }), d === 'keep' ? '그대로 둠' : '지우기'),
+            ),
+        ),
+        r.id.endsWith(':target') ? h('div', { class: 'small muted', style: 'grid-column:1/-1' }, '대상 요소 안의 글자는 지울 수 없습니다. 개인정보라면 다른 요소로 다시 녹화하거나 변수로 바꿔 주세요.') : null,
+      ),
+    );
+    const all = (d) => () => {
+      for (const r of draft.remaining) st.decisions[r.id] = d === 'clear' && r.id.endsWith(':target') ? 'keep' : d;
+      draw();
+    };
+    return [
+      h('p', { class: 'small', style: 'margin:0' }, '녹화 정보(녹화 때 입력한 값의 원본, 받은 파일 이름, 알림창 문구, 주소의 쿼리, 첨부 파일 경로 등)는 자동으로 지웠습니다. 아래 남은 값은 하나씩 정해 주세요. 실제 고객·거래처 정보라면 "지우기"를 고르세요 — 지운 칸은 비어서, 설치한 사람이 엑셀 열이나 변수로 바꿔 써야 합니다.'),
+      h('details', null, h('summary', { class: 'small' }, `자동으로 지운 것 ${draft.removed.length}개`), h('ul', { class: 'small' }, draft.removed.map((r) => h('li', null, `${r.where}: ${r.what}`)))),
+      draft.remaining.length
+        ? [h('div', { class: 'row' }, h('b', null, `남은 값 ${draft.remaining.length}개`), h('div', { style: 'flex:1' }), h('button', { class: 'sm', onclick: all('keep') }, '모두 그대로 둠'), h('button', { class: 'sm', onclick: all('clear') }, '모두 지우기')), h('div', null, rows)]
+        : h('div', { class: 'notice info' }, '확인할 남은 값이 없습니다.'),
+    ];
+  }
+
+  // ----- 3. 예시 입력 -----
+  function sampleStep() {
+    if (!st.rows.length) st.rows.push(Object.fromEntries(headers.map((c) => [c, st.columns.find((x) => x.name === c)?.example ?? (c === '메모' ? '예시' : '')])));
+    const tableBox = h('div');
+    const drawTable = () =>
+      mount(
+        tableBox,
+        h(
+          'div',
+          { class: 'table-wrap' },
+          h(
+            'table',
+            null,
+            h('thead', null, h('tr', null, headers.map((c) => h('th', null, c)), h('th', null, ''))),
+            h(
+              'tbody',
+              null,
+              st.rows.map((r, i) => h('tr', null, headers.map((c) => h('td', null, text(r, c, { placeholder: st.columns.find((x) => x.name === c)?.help || '' }))), h('td', null, st.rows.length > 1 ? h('button', { class: 'sm danger', onclick: () => (st.rows.splice(i, 1), drawTable()) }, '삭제') : null))),
+            ),
+          ),
+        ),
+        st.rows.length < 5 ? h('div', { style: 'margin-top:8px' }, h('button', { class: 'sm', onclick: () => (st.rows.push(Object.fromEntries(headers.map((c) => [c, '']))), drawTable()) }, '＋ 행 추가')) : null,
+      );
+    drawTable();
+    return [
+      h('div', { class: 'notice warn' }, h('b', null, '실제 고객·거래처 정보는 넣지 마세요.'), ' 세트는 누구나 볼 수 있게 공개됩니다. 공개된 정보(예: 상장회사 이름)나 지어낸 값만 쓰세요. 주민등록번호·휴대전화·이메일·카드번호로 보이는 값이 있으면 내보낼 수 없습니다.'),
+      h('p', { class: 'muted small', style: 'margin:0' }, st.columns.length ? '설치한 사람이 [예시로 실행]으로 바로 돌려 볼 입력입니다 (1~5행).' : '이 레시피는 엑셀 열을 쓰지 않아, 예시 입력은 "메모" 열 하나로 만듭니다 (행마다 한 번 실행).'),
+      tableBox,
+    ];
+  }
+
+  // ----- 4. 기대 결과 -----
+  function expectedStep() {
+    const ta = text(st, 'expectedText', { area: true });
+    ta.classList.add('json');
+    ta.style.minHeight = '200px';
+    ta.spellcheck = false;
+    return [
+      h('p', { class: 'small', style: 'margin:0' }, '예시 입력으로 실행했을 때 나와야 하는 결과입니다(선택). 허브가 세트를 주기적으로 실행해 볼 때 이 결과와 비교합니다. 값은 모양(정규식)이나 일부 글자로 적으면 날마다 바뀌는 값에도 맞습니다.'),
+      h(
+        'div',
+        { class: 'row' },
+        draft.expected
+          ? h('button', { class: 'sm', onclick: () => ((ta.value = st.expectedText = JSON.stringify(draft.expected, null, 2)), undefined) }, draft.expectedFrom ? '지난 실행으로 초안 만들기' : '레시피로 초안 만들기')
+          : null,
+        h('button', { class: 'sm', onclick: () => ((ta.value = st.expectedText = ''), undefined) }, '비우기'),
+        draft.expectedFrom ? h('span', { class: 'muted small' }, '지난 실행의 값 이름·값 모양·파일 종류만 씁니다 (실제 값은 넣지 않음).') : null,
+      ),
+      ta,
+      h('details', null, h('summary', { class: 'small' }, '형식'), h('pre', { class: 'small' }, '{\n  "rows": {\n    "*":      { "status": "ok", "values": { "합계": { "regex": "^[\\\\d,]+원$" } }, "files": [{ "glob": "*.pdf", "type": "pdf" }] },\n    "예시값": { "values": { "회사명": { "equals": "예시값" } } }\n  }\n}\n"*" 는 모든 행, 그 밖의 키는 예시 입력 첫 열 값입니다. 값 확인: equals(같음) · contains(포함) · regex(모양).')),
+    ];
+  }
+
+  // ----- 5. 확인·내려받기 -----
+  function finishStep() {
+    const box = h('div', { class: 'stack' }, h('div', { class: 'muted small' }, '세트를 검사하는 중…'));
+    (async () => {
+      let r;
+      try {
+        r = await api('POST', `/api/recipes/${recipeId}/set`, { ...payload(), check: true });
+      } catch (e) {
+        mount(box, h('div', { class: 'notice bad', style: 'white-space:pre-wrap' }, e.message));
+        return;
+      }
+      st.check = r;
+      const done = h('div');
+      const dl = h(
+        'button',
+        {
+          class: 'primary',
+          disabled: !r.ok,
+          onclick: safely(async () => {
+            const res = await fetch(`/api/recipes/${recipeId}/set`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload()) });
+            if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `요청 실패 (${res.status})`);
+            const a = h('a', { href: URL.createObjectURL(await res.blob()), download: r.fileName });
+            a.click();
+            setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+            try {
+              localStorage.setItem('rpa:setAuthor', JSON.stringify({ name: st.info.author.trim(), github: st.info.github.trim() }));
+            } catch {
+              /* 저장 불가 환경 */
+            }
+            mount(
+              done,
+              h(
+                'div',
+                { class: 'notice info' },
+                h('b', null, `${r.fileName} 을(를) 내려받았습니다.`),
+                h(
+                  'ol',
+                  null,
+                  h('li', null, '받은 세트를 [허브 → 세트 파일 가져오기]로 설치해 [예시로 실행]이 되는지 먼저 확인해 보세요.'),
+                  h('li', null, '공개 허브에 올리려면 ', h('a', { href: `${HUB_REPO}/blob/main/CONTRIBUTING.md`, target: '_blank', rel: 'noopener noreferrer' }, '허브 저장소의 CONTRIBUTING 안내'), '에 따라 pull request 로 보냅니다. 허브는 같은 검사와 예시 실행을 다시 합니다.'),
+                  h('li', null, '명령줄 검사: ', h('code', null, `web-rpa.cmd set lint ${r.fileName}`)),
+                ),
+              ),
+            );
+          }),
+        },
+        '⬇ 세트 파일 내려받기',
+      );
+      mount(
+        box,
+        h('div', { class: 'small' }, h('b', null, r.fileName), ` · ${(r.size / 1024).toFixed(1)}KB · sha256 ${r.sha256.slice(0, 16)}…`),
+        r.summary?.length ? h('div', { class: 'notice info' }, r.summary.map((x) => h('div', null, x))) : null,
+        r.manifest?.risk?.length ? h('div', { class: 'row' }, h('span', { class: 'small muted' }, '위험 표시:'), riskBadges(r.manifest.risk)) : null,
+        r.errors.length ? h('div', { class: 'notice bad' }, h('b', null, '고쳐야 내보낼 수 있습니다'), h('ul', null, r.errors.map((x) => h('li', null, x)))) : h('div', { class: 'notice info' }, '검사를 통과했습니다.'),
+        r.warnings.length ? h('div', { class: 'notice warn' }, h('b', null, '확인할 점'), h('ul', null, r.warnings.map((x) => h('li', null, x)))) : null,
+        h('div', null, dl),
+        done,
+      );
+    })();
+    return box;
+  }
+
+  draw();
+}
+
+/** 설정: 허브 주소 */
+function hubSourcesCard(s, redraw) {
+  const list = (s.hubSources ?? []).map((x) => ({ ...x }));
+  const box = h('div', { class: 'stack' });
+  const drawList = () =>
+    mount(
+      box,
+      list.length
+        ? list.map((x, i) =>
+            h(
+              'div',
+              { class: 'hub-src' },
+              h('input', { type: 'text', value: x.name, placeholder: '이름', 'aria-label': '허브 이름', oninput: (e) => (x.name = e.target.value) }),
+              h('input', { type: 'text', value: x.url, placeholder: 'https://…/index.json', 'aria-label': '허브 주소', oninput: (e) => (x.url = e.target.value) }),
+              h('button', { class: 'sm danger', onclick: () => (list.splice(i, 1), drawList()) }, '삭제'),
+            ),
+          )
+        : h('p', { class: 'muted small', style: 'margin:0' }, '허브를 쓰지 않습니다. 세트 파일(.wrset)은 그래도 가져올 수 있습니다.'),
+    );
+  drawList();
+  return h(
+    'div',
+    { class: 'card stack' },
+    h('h2', null, '허브'),
+    h('p', { class: 'muted small', style: 'margin:0' }, '진행 세트를 찾을 허브 목록(index.json) 주소입니다. https 주소만 쓸 수 있습니다. 허브 목록은 세트 파일의 sha256 을 함께 알려 주고, 내려받은 파일이 그 값과 다르면 설치하지 않습니다.'),
+    box,
+    h(
+      'div',
+      { class: 'row' },
+      h('button', { class: 'sm', onclick: () => (list.push({ name: '', url: '' }), drawList()) }, '＋ 허브 추가'),
+      h('button', { class: 'sm', onclick: () => (list.splice(0, list.length, { ...s.hubDefault }), drawList()) }, '기본값으로'),
+      h(
+        'button',
+        {
+          class: 'primary',
+          onclick: safely(async () => {
+            await api('PUT', '/api/settings', { hubSources: list.filter((x) => x.url.trim()) });
+            toast('허브 설정을 저장했습니다.');
+            await redraw();
+          }),
+        },
+        '저장',
+      ),
     ),
   );
 }

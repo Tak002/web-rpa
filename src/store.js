@@ -1,4 +1,4 @@
-// 작업 폴더: recipes/ (레시피 JSON), runs/ (실행 결과), uploads/ (엑셀), profiles/ (브라우저 프로필), trash/
+// 작업 폴더: recipes/ (레시피 JSON), runs/ (실행 결과), uploads/ (엑셀), profiles/ (브라우저 프로필), trash/, sets/ (설치한 세트 — src/set/index.js)
 
 import fs from 'node:fs/promises';
 import fssync from 'node:fs';
@@ -40,6 +40,7 @@ export class Store {
           steps: Object.values(r.blocks ?? {}).reduce((n, s) => n + s.length, 0),
           excelColumns: excelColumnsOf(r),
           updatedAt: r.updatedAt,
+          set: r.origin?.set ? { id: r.origin.set, version: r.origin.version } : undefined, // 세트로 설치한 레시피
         });
       } catch {
         /* 깨진 파일은 목록에서 뺀다 */

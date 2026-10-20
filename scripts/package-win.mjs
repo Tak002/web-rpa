@@ -22,12 +22,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const LAUNCHER = [
   '@echo off',
+  'setlocal',
   'chcp 65001 >nul',
   'rem web-rpa 실행. 이 창을 닫으면 서버가 멈춘다. 작업 데이터는 %LOCALAPPDATA%\\web-rpa 에 남는다.',
+  'rem 명령줄: web-rpa.cmd set lint 파일.wrset · web-rpa.cmd hub list … (app\\src\\cli.js — 파일은 지금 폴더 기준으로 찾는다)',
+  'if /i "%~1"=="set" goto cli',
+  'if /i "%~1"=="hub" goto cli',
   'title web-rpa',
   'cd /d "%~dp0app"',
   '"%~dp0node\\node.exe" "%~dp0app\\src\\launch.js" %*',
   'if errorlevel 1 pause',
+  'goto :eof',
+  ':cli',
+  'set "WEB_RPA_CWD=%CD%"',
+  '"%~dp0node\\node.exe" "%~dp0app\\src\\cli.js" %*',
+  'exit /b %errorlevel%',
   '',
 ].join('\r\n');
 
