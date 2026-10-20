@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>웹 RPA</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f5d9e'/%3E%3Ccircle cx='16' cy='16' r='6' fill='%23fff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="#/recipes"><span class="logo"></span>웹 RPA<small>녹화 · 엑셀 반복 실행</small></a>
+  <nav id="nav">
+    <a href="#/recipes" data-nav="recipes">레시피</a>
+    <a href="#/record" data-nav="record">녹화</a>
+    <a href="#/run" data-nav="run">실행</a>
+    <a href="#/reports" data-nav="reports">리포트</a>
+    <a href="#/settings" data-nav="settings">설정</a>
+  </nav>
+  <div id="live"></div>
+</header>
+<main id="app"></main>
+<div id="toasts" aria-live="polite"></div>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>로그인 (RPA 실험실)</title><link rel="stylesheet" href="/lab.css"></head>
+<body>
+<header><b>RPA 실험실</b></header>
+<main>
+<h1>로그인</h1>
+<form method="post" action="/login">
+  <input type="hidden" name="next" id="next">
+  <div class="row"><label for="uid">아이디</label><input id="uid" name="uid" autocomplete="off"></div>
+  <div class="row"><label for="upw">비밀번호</label><input id="upw" name="upw" type="password"></div>
+  <div class="row"><button type="submit" class="primary">로그인</button></div>
+  <p id="err" class="error"></p>
+</form>
+</main>
+<script>
+  const q = new URLSearchParams(location.search);
+  document.getElementById('next').value = q.get('next') || '/ledger.html';
+  if (q.get('error')) document.getElementById('err').textContent = '아이디 또는 비밀번호가 올바르지 않습니다.';
+</script>
+</body></html>

@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><link rel="stylesheet" href="/lab.css"><style>body{background:#fffbe6;margin:6px}</style></head>
+<body><label for="code">확인 코드</label> <input id="code" size="8"> <button type="button" id="btnVerify">코드 확인</button> <span id="vr"></span>
+<script>
+  document.getElementById('btnVerify').addEventListener('click', () => {
+    const code = document.getElementById('code').value.trim();
+    const ok = /^\d{6}$/.test(code);
+    document.getElementById('vr').textContent = ok ? '확인 완료' : '코드 형식 오류';
+    if (ok) window.top.postMessage({ type: 'verified', code }, '*');
+  });
+</script></body></html>

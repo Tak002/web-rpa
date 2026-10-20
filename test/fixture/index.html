@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>거래처 조회 (테스트)</title>
+<style>
+  body { font-family: sans-serif; margin: 24px; }
+  label { display: inline-block; width: 90px; }
+  .row { margin: 8px 0; }
+  table { border-collapse: collapse; margin-top: 12px; }
+  td, th { border: 1px solid #ccc; padding: 4px 8px; }
+  #out { margin-top: 12px; min-height: 24px; }
+</style>
+</head>
+<body>
+<h1>거래처 조회</h1>
+<div class="row"><label for="__BIZ_ID__">사업자번호</label><input id="__BIZ_ID__" type="text"></div>
+<div class="row"><label for="company">상호</label><input id="company" name="company" type="text"></div>
+<div class="row"><label for="period">기간</label>
+  <select id="period" name="period">
+    <option value="">선택</option>
+    <option value="P1">1기 (예정+확정)</option>
+    <option value="P2">2기 (예정+확정)</option>
+  </select>
+</div>
+<div class="row"><label><input type="checkbox" id="detail"> 상세 포함</label></div>
+<div class="row">
+  <button type="button" id="btn_search___SEARCH_SUFFIX__">조회</button>
+  <button type="button" onclick="window.print()">인쇄</button>
+  <a href="/download.txt" download>자료 받기</a>
+  <button type="button" onclick="setTimeout(() => window.open('/report.csv?b=' + biz.value), 400)">새 창으로 받기</button>
+</div>
+<div id="out"></div>
+<table>
+  <tr><th>구분</th><th></th></tr>
+  <tr><td>가</td><td><button type="button" onclick="pick('가')">선택</button></td></tr>
+  <tr><td>나</td><td><button type="button" onclick="pick('나')">선택</button></td></tr>
+  <tr><td>다</td><td><button type="button" onclick="pick('다')">선택</button></td></tr>
+</table>
+<p id="picked"></p>
+<iframe name="inner" src="/frame.html" width="420" height="80"></iframe>
+<script>
+  const biz = document.querySelector('input[type=text]');
+  function pick(v) { document.getElementById('picked').textContent = '선택됨: ' + v; }
+  document.querySelector('[id^=btn_search_]').addEventListener('click', () => {
+    const b = biz.value.replace(/\D/g, '');
+    const c = document.getElementById('company').value;
+    if (!b) { alert('사업자번호를 입력하세요'); return; }
+    if (!confirm(c + ' 을(를) 조회하시겠습니까?')) return;
+    const out = document.getElementById('out');
+    out.textContent = '조회 중…';
+    setTimeout(() => {
+      // 결과는 늦게 그려지고, id 는 매번 바뀐다.
+      out.innerHTML = '<span id="result-' + Date.now() + '">조회결과: ' + c + ' (' + b + ') ' + document.getElementById('period').value +
+        (document.getElementById('detail').checked ? ' 상세' : '') + '</span> <a href="#" id="open_' + Math.floor(Math.random() * 1e6) + '">상세 보기</a>';
+      out.querySelector('a').addEventListener('click', (e) => { e.preventDefault(); window.open('/detail.html?b=' + b, 'detail', 'width=500,height=300'); });
+    }, 700);
+  });
+</script>
+</body>
+</html>

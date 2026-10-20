@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>건강보험 사업장 고지 내역 (RPA 실험실)</title><link rel="stylesheet" href="/lab.css"></head>
+<body>
+<header><b>RPA 실험실</b><nav><a href="/ledger.html">원장 조회</a><a href="/nhis.html">건강보험 고지</a><a href="/logout">로그아웃</a></nav></header>
+<main>
+<h1>건강보험 사업장 고지 내역</h1>
+<p>사업장관리번호 12345678901 · <span id="summary">불러오는 중…</span></p>
+<table id="bills"><thead><tr><th>고지년월</th><th>보험료</th><th>상태</th><th>고지서</th></tr></thead><tbody></tbody></table>
+<p class="hint">새 달 고지서는 매월 중순에 올라옵니다. 정렬 순서는 사이트 설정에 따라 다릅니다.</p>
+</main>
+<script>
+  fetch('/api/nhis/list').then((r) => r.json()).then(({ months }) => {
+    setTimeout(() => {
+      document.querySelector('#bills tbody').innerHTML = months.map((m) =>
+        '<tr data-ym="' + m.key + '"><td>' + m.ym + '</td><td>' + m.amount.toLocaleString() + '원</td><td>' + (m.paid ? '납부완료' : '<span class="badge">미납</span>') +
+        '</td><td><button type="button" onclick="location.href=\'/nhis/bill?ym=' + encodeURIComponent(m.ym) + '\'">고지서 받기</button></td></tr>').join('');
+      const latest = months.map((m) => m.key).sort().at(-1);
+      document.getElementById('summary').textContent = '고지 ' + months.length + '건 · 최근 ' + latest.slice(0, 4) + '년 ' + latest.slice(4) + '월';
+    }, 500);
+  });
+</script>
+</body></html>

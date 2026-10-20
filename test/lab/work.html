@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>거래처 등록 · 증빙 제출 (RPA 실험실)</title><link rel="stylesheet" href="/lab.css"></head>
+<body>
+<header><b>RPA 실험실</b><nav><a href="/ledger.html">원장 조회</a><a href="/nhis.html">건강보험 고지</a><a href="/logout">로그아웃</a></nav></header>
+<main>
+<h1>거래처 등록 · 증빙 제출</h1>
+<p>사업자번호: <b id="bizShow"></b></p>
+<div class="row"><span class="lbl">거래처</span><input id="partnerCode" readonly placeholder="코드" size="6"><input id="partnerName" readonly placeholder="거래처명"><button type="button" id="btnPartner">거래처 검색</button></div>
+<div class="row"><label for="tel">담당자 전화</label><input id="tel" type="text" maxlength="13" placeholder="010-0000-0000"></div>
+<div class="row"><label for="supplyDate">공급일자</label><input id="supplyDate" type="date"></div>
+<div class="row"><span class="lbl">과세구분</span><label><input type="radio" name="taxType" value="T"> 과세</label><label><input type="radio" name="taxType" value="F"> 면세</label></div>
+<div class="row"><span class="lbl"></span><input type="checkbox" id="agree" class="sr"><label for="agree" class="fancy">개인정보 수집에 동의합니다</label></div>
+<div class="row"><label for="memo">비고</label><textarea id="memo" rows="2" cols="40"></textarea></div>
+<div class="row"><label for="file1">증빙 파일</label><input type="file" id="file1" name="file1"></div>
+<div class="row"><span class="lbl">사업자등록증</span><input type="file" id="file2" hidden><button type="button" id="btnFile2">파일 찾기…</button><span id="file2name" class="hint">선택된 파일 없음</span></div>
+<div class="row"><span class="lbl">도움말</span><lab-help></lab-help></div>
+<div class="row"><span class="lbl">본인 확인</span><iframe name="verify" src="/frame-outer.html" width="520" height="86" title="본인 확인" style="border:1px solid #ccd3dd"></iframe></div>
+<input type="hidden" id="verifyCode">
+<div class="row"><span class="lbl"></span><button type="button" id="btnSave" class="primary">저장</button></div>
+<div id="saveStatus"></div>
+<div id="saveResult"></div>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const biz = new URLSearchParams(location.search).get('biz') || '';
+  $('bizShow').textContent = biz;
+  window.setPartner = (code, name) => { $('partnerCode').value = code; $('partnerName').value = name; };
+  $('btnPartner').addEventListener('click', () => window.open('/partner.html', 'partner', 'width=560,height=440'));
+  // 마스크 입력: 숫자만 받아 하이픈을 넣는다
+  $('tel').addEventListener('input', (e) => {
+    const d = e.target.value.replace(/\D/g, '').slice(0, 11);
+    e.target.value = d.length > 7 ? d.slice(0, 3) + '-' + d.slice(3, 7) + '-' + d.slice(7) : d.length > 3 ? d.slice(0, 3) + '-' + d.slice(3) : d;
+  });
+  $('btnFile2').addEventListener('click', () => $('file2').click());
+  $('file2').addEventListener('change', () => { $('file2name').textContent = $('file2').files[0]?.name || '선택된 파일 없음'; });
+  window.helpOpened = false;
+  customElements.define('lab-help', class extends HTMLElement {
+    connectedCallback() {
+      const root = this.attachShadow({ mode: 'open' });
+      root.innerHTML = '<button type="button" part="b">도움말 보기</button> <span id="tip"></span>';
+      root.querySelector('button').addEventListener('click', () => {
+        root.getElementById('tip').textContent = '저장 전에 본인 확인 코드를 입력하세요.';
+        window.helpOpened = true;
+      });
+    }
+  });
+  window.addEventListener('message', (e) => { if (e.data && e.data.type === 'verified') $('verifyCode').value = e.data.code; });
+
+  $('btnSave').addEventListener('click', async () => {
+    if (!$('partnerCode').value) { alert('거래처를 선택하세요'); return; }
+    if (!$('agree').checked) { alert('개인정보 수집 동의가 필요합니다'); return; }
+    if (!$('verifyCode').value) { alert('본인 확인 코드를 먼저 확인하세요'); return; }
+    const reason = prompt('변경 사유를 입력하세요', '');
+    if (!reason) { alert('사유가 없어 저장을 취소했습니다'); return; }
+    if (!confirm('저장하시겠습니까?')) return;
+    $('btnSave').disabled = true;
+    $('saveStatus').textContent = '저장 중…';
+    const fd = new FormData();
+    fd.append('biz', biz);
+    fd.append('partnerCode', $('partnerCode').value);
+    fd.append('partnerName', $('partnerName').value);
+    fd.append('tel', $('tel').value);
+    fd.append('supplyDate', $('supplyDate').value);
+    fd.append('taxType', document.querySelector('input[name=taxType]:checked')?.value || '');
+    fd.append('agree', String($('agree').checked));
+    fd.append('memo', $('memo').value);
+    fd.append('reason', reason);
+    fd.append('verifyCode', $('verifyCode').value);
+    fd.append('helpOpened', String(window.helpOpened));
+    if ($('file1').files[0]) fd.append('file1', $('file1').files[0]);
+    if ($('file2').files[0]) fd.append('file2', $('file2').files[0]);
+    const r = await (await fetch('/api/save', { method: 'POST', body: fd })).json();
+    setTimeout(() => {
+      $('saveStatus').textContent = '';
+      const rid = 'receipt_' + Math.floor(Math.random() * 1e7);
+      $('saveResult').innerHTML = '<p id="' + rid + '" data-receipt="' + r.receipt + '" class="ok">저장 완료 · 접수번호 ' + r.receipt + '</p>' +
+        (r.review ? '<p class="warn">검토 필요</p><button type="button" id="btnReview">검토 요청</button>' : '<p>자동 승인</p>');
+      if (r.review) $('btnReview').addEventListener('click', async () => {
+        await fetch('/api/review?receipt=' + r.receipt, { method: 'POST' });
+        alert('검토 요청이 접수되었습니다');
+      });
+    }, 1200); // 늦게 그려지는 결과
+  });
+</script>
+</body></html>

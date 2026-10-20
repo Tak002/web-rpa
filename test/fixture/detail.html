@@ -1,0 +1,7 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>상세</title></head>
+<body style="font-family:sans-serif">
+<p id="d"></p>
+<button type="button" onclick="window.close()">닫기</button>
+<script>document.getElementById('d').textContent = '상세: ' + new URLSearchParams(location.search).get('b');</script>
+</body></html>

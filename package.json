@@ -1,0 +1,19 @@
+{
+  "name": "web-rpa",
+  "version": "0.1.0",
+  "private": true,
+  "description": "웹 작업을 녹화해 엑셀 행마다 재생하는 로컬 RPA 도구",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node test/e2e.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "exceljs": "4.4.0",
+    "pdf-lib": "1.17.1",
+    "playwright-core": "1.58.2"
+  }
+}

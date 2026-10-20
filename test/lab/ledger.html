@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>매출 원장 조회 (RPA 실험실)</title><link rel="stylesheet" href="/lab.css"></head>
+<body>
+<header><b>RPA 실험실</b><nav><a href="/ledger.html">원장 조회</a><a href="/nhis.html">건강보험 고지</a><a href="/logout">로그아웃</a></nav></header>
+<main>
+<h1>매출 원장 조회</h1>
+<div class="row"><label for="biz___RAND__">사업자번호</label><input id="biz___RAND__" type="text" placeholder="숫자 10자리"></div>
+<div class="row"><label for="period">기간</label>
+  <select id="period"><option value="">선택</option><option value="H1">2026년 1기 (1~6월)</option><option value="H2">2026년 2기 (7~12월)</option></select></div>
+<div class="row"><button type="button" id="btnSearch___RAND__">조회</button><span class="hint">사업자번호 칸에서 Enter 로도 조회됩니다.</span></div>
+<div id="status"></div>
+<section id="result" hidden>
+  <table id="ledger"><thead><tr><th>일자</th><th>거래처</th><th>금액</th></tr></thead><tbody></tbody></table>
+  <p>합계: <b id="total"></b></p>
+  <h2>다운로드 센터</h2>
+  <ol class="downloads">
+    <li><a href="/files/manual.txt" download>① 사용 설명서 받기</a> <span class="hint">링크 + download 속성</span></li>
+    <li><form method="post" action="/export" id="exportForm"><input type="hidden" name="biz"><input type="hidden" name="period"><button type="submit">② 엑셀 다운로드</button></form> <span class="hint">폼 POST · 한글 파일명 · 실제 xlsx</span></li>
+    <li><button type="button" id="btnBlob">③ CSV 내려받기 (브라우저 생성)</button> <span class="hint">Blob URL</span></li>
+    <li><button type="button" id="btnCert">④ 증명서 발급</button> <span class="hint">확인창 → 다운로드</span></li>
+    <li><button type="button" id="btnJob">⑤ 대용량 자료 요청</button> <span id="jobStatus"></span> <span class="hint">서버가 3.5초 동안 만든 뒤 링크가 생김 (3MB)</span></li>
+    <li><button type="button" id="btnPopup">⑥ 새 창에서 받기</button> <span class="hint">새 창이 열려 다운로드 후 스스로 닫힘</span></li>
+    <li><iframe name="dlframe" id="dlframe" title="프레임 다운로드" width="300" height="34" style="border:1px solid #ccd3dd;vertical-align:middle"></iframe> <span class="hint">iframe 안 링크</span></li>
+    <li><a id="dataLink" download="data-url.csv">⑧ data URL 받기</a> <span class="hint">data: 주소</span></li>
+    <li><a id="blankLink" target="_blank">⑨ 새 탭 링크로 받기</a> <span class="hint">target=_blank + 첨부 응답</span></li>
+  </ol>
+  <p><a id="toWork">입력 작업으로 이동 →</a></p>
+</section>
+</main>
+<script>
+  const biz = document.querySelector('[id^=biz_]');
+  const $ = (id) => document.getElementById(id);
+  let cur = null;
+  function rows(b, p) {
+    const seed = [...b].reduce((s, d) => s + Number(d), 0);
+    return [1, 2, 3].map((i) => ({ date: '2026-' + String(p === 'H1' ? i : i + 6).padStart(2, '0') + '-15', partner: ['가나상사', '다라상사', '마바상사'][i - 1], amount: (seed + i) * 1000 }));
+  }
+  function search() {
+    const b = biz.value.replace(/\D/g, '');
+    const p = $('period').value;
+    if (!b) { alert('사업자번호를 입력하세요'); return; }
+    if (!p) { alert('기간을 선택하세요'); return; }
+    $('status').textContent = '조회 중…';
+    $('result').hidden = true;
+    setTimeout(() => render(b, p), 900); // 늦게 그려지는 결과
+  }
+  function render(b, p) {
+    const rs = rows(b, p);
+    const total = rs.reduce((s, r) => s + r.amount, 0);
+    cur = { b, p, rs, total };
+    document.querySelector('#ledger tbody').innerHTML = rs.map((r) => '<tr><td>' + r.date + '</td><td>' + r.partner + '</td><td>' + r.amount.toLocaleString() + '</td></tr>').join('');
+    $('total').textContent = total.toLocaleString() + '원';
+    $('total').dataset.total = total;
+    $('status').textContent = '조회 완료 (' + rs.length + '건)';
+    const f = $('exportForm');
+    f.biz.value = b;
+    f.period.value = p;
+    $('dlframe').src = '/frame-dl.html?biz=' + b;
+    $('dataLink').href = 'data:text/csv;charset=utf-8,' + encodeURIComponent('﻿사업자번호,합계\r\n' + b + ',' + total + '\r\n');
+    $('blankLink').href = '/files/blank.txt?biz=' + b;
+    $('toWork').href = '/work.html?biz=' + b;
+    $('jobStatus').textContent = '';
+    $('result').hidden = false;
+  }
+  biz.addEventListener('keydown', (e) => { if (e.key === 'Enter') search(); });
+  document.querySelector('[id^=btnSearch_]').addEventListener('click', search);
+  $('btnBlob').addEventListener('click', () => {
+    const csv = '﻿일자,거래처,금액\r\n' + cur.rs.map((r) => [r.date, r.partner, r.amount].join(',')).join('\r\n') + '\r\n';
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+    a.download = 'ledger_' + cur.b + '.csv';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 5000);
+  });
+  $('btnCert').addEventListener('click', () => {
+    if (!confirm('납세증명서를 발급하시겠습니까?')) return;
+    location.href = '/cert.pdf?biz=' + cur.b;
+  });
+  $('btnJob').addEventListener('click', async () => {
+    const { id } = await (await fetch('/api/job?biz=' + cur.b, { method: 'POST' })).json();
+    $('jobStatus').textContent = '생성 중…';
+    const t = setInterval(async () => {
+      const { ready } = await (await fetch('/api/job/' + id)).json();
+      if (!ready) return;
+      clearInterval(t);
+      $('jobStatus').innerHTML = '생성 완료 <a href="/job/' + id + '/file" id="job_' + id + '">대용량 자료 받기</a>';
+    }, 500);
+  });
+  $('btnPopup').addEventListener('click', () => setTimeout(() => window.open('/popup-dl.html?biz=' + cur.b, 'dl', 'width=440,height=220'), 300));
+</script>
+</body></html>

@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>거래처 검색</title><link rel="stylesheet" href="/lab.css"></head>
+<body><main>
+<h1>거래처 검색</h1>
+<div class="row"><input id="q" placeholder="거래처명 입력 후 Enter" aria-label="거래처명"></div>
+<table id="list"><thead><tr><th>코드</th><th>거래처명</th></tr></thead><tbody></tbody></table>
+<p class="hint">행을 더블클릭하면 선택되고 창이 닫힙니다.</p>
+</main>
+<script>
+  const P = [['P001', '가나상사'], ['P002', '다라상사'], ['P003', '마바상사'], ['P004', '사아상사']];
+  const q = document.getElementById('q');
+  const tbody = document.querySelector('#list tbody');
+  q.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    tbody.innerHTML = '<tr><td colspan="2">검색 중…</td></tr>';
+    setTimeout(() => {
+      // "상사" 로 찾으면 여러 건이 나온다 → 원하는 행을 골라야 한다
+      const word = q.value.trim();
+      const hits = P.filter(([, n]) => n.includes(word) || n.endsWith(word.slice(-2)));
+      tbody.innerHTML = hits.map(([c, n]) => '<tr data-code="' + c + '"><td>' + c + '</td><td>' + n + '</td></tr>').join('') || '<tr><td colspan="2">검색 결과 없음</td></tr>';
+    }, 400);
+  });
+  tbody.addEventListener('dblclick', (e) => {
+    const tr = e.target.closest('tr[data-code]');
+    if (!tr) return;
+    window.opener.setPartner(tr.dataset.code, tr.cells[1].textContent);
+    window.close();
+  });
+</script></body></html>
