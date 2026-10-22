@@ -23,9 +23,41 @@
 소스에서 실행하려면 [Node.js](https://nodejs.org/) 20 이상을 설치하고 `start.cmd` 를 실행합니다(처음에 의존성을 설치하고 http://127.0.0.1:4800 을 엽니다. 작업 데이터는 `workspace\`).
 설치 파일 만들기: [Inno Setup 6](https://jrsoftware.org/isinfo.php) 을 설치한 뒤 `node scripts\package-win.mjs --installer --smoke` (결과 `dist\`, 만든 파일을 실제로 설치·실행·제거해 확인합니다).
 
+- **업데이트**: 설치본은 시작할 때 새 버전을 확인해 있으면 설치하고 다시 엽니다(아래 [업데이트](#업데이트)). **0.2.0 이하에는 이 기능이 없으니 0.2.1 설치 파일을 한 번 직접 내려받아 설치하세요**(지금 설치 위에 덮어 설치, 레시피·실행 결과·설정은 그대로 남음). 그다음부터는 자동으로 업데이트됩니다.
 - **브라우저**는 화면의 **설정**에서 고릅니다: 자동(Edge → Chrome → Brave → 내장 Chromium), Edge, Chrome, Brave, 내장 Chromium, 직접 지정(Chromium 계열 실행 파일). 설치 여부는 자동으로 감지하고 "시험 실행"으로 버전을 확인할 수 있습니다.
 - **프로필**은 브라우저마다 따로 둡니다(`workspace\profiles\<브라우저>`). 녹화·실행·AI 관찰이 같은 프로필을 쓰므로 녹화 브라우저에서 로그인해 두면 실행 때도 유지됩니다(사이트가 세션을 유지하는 동안).
 - 녹화·실행 브라우저는 서버가 도는 PC 화면에 뜹니다. 서버를 서비스(세션 0)로 띄우면 브라우저 창이 보이지 않으니, 로그인한 사용자 세션에서 실행하세요(`run-server.cmd`).
+
+## 업데이트
+
+- **시작할 때 자동 설치(기본)**: 설치본은 바로가기로 시작할 때 새 버전을 확인하고(5초 제한), 있으면 묻지 않고 내려받아 확인한 뒤 설치하고 다시 엽니다. 설치 진행 창이 잠깐 보이고, 끝나면 같은 주소·같은 작업 폴더로 다시 뜹니다. 이미 실행 중이면 확인하지 않고, 확인·내려받기·설치 중 무엇이 실패해도 검은 창에 한 줄 남기고 지금 버전으로 실행합니다. 서버가 뜨기 전이라 진행 중인 녹화·실행은 없습니다.
+- **배너**: 자동 설치를 끄면(설정 → 업데이트 → "새 버전이 있으면 시작할 때 묻지 않고 설치") 새 버전이 있을 때 모든 화면 위에 안내가 뜹니다 — [변경 내용], [지금 업데이트], [닫기](이번 실행 동안 그 버전 안내 숨김). [지금 업데이트] 는 녹화·실행·AI 도우미가 화면을 보는 중이면 거절합니다(작업이 끝난 뒤 다시). 설치하는 동안 "설치가 끝나면 web-rpa 가 다시 열립니다" 가 보이고, 다시 뜨면 화면이 저절로 새로 고쳐집니다.
+- **설정 → 업데이트**: 시작할 때 새 버전 확인(끄면 [지금 확인] 으로만), 시작할 때 자동 설치, 피드 주소, [지금 확인], 마지막 확인 결과.
+- **압축본**은 자동으로 설치하지 않고 안내의 [내려받기 페이지] 로 새 압축본을 받게 합니다. **소스에서 실행**하면 확인하지 않습니다(git pull — 환경 변수 `WEB_RPA_UPDATE_URL` 을 주면 확인).
+- **확인하는 것**: https 피드, 설치 파일의 크기·sha256, 그리고 앱 속 공개 키로 **Ed25519 서명**(버전·sha256·크기를 묶어 서명)을 모두 확인한 것만 설치합니다. 서명이 없거나 틀리면 설치하지 않고 내려받기 페이지만 안내합니다. 지금과 같거나 낮은 버전은 설치하지 않습니다(옛 설치 파일을 새 버전인 척 내밀어도 서명이 맞지 않음).
+- **피드**: 기본 `https://github.com/Tak002/web-rpa/releases/latest/download/latest.json` — GitHub 의 최신 **정식** 릴리스(pre-release·비공개 저장소는 보이지 않음)에 올린 `latest.json`. 설정의 피드 주소나 환경 변수 `WEB_RPA_UPDATE_URL` 로 바꿀 수 있습니다(https 만, 이 PC 안의 시험 주소는 http 허용). 피드가 없거나 받지 못하면 조용히 넘어가고 결과는 설정 카드에만 남습니다.
+- **기록**: `%LOCALAPPDATA%\web-rpa\updates\` — 받은 설치 파일, `update-log.txt`(업데이트마다 한 줄), `setup-<버전>.log`(설치 로그). 지난 버전의 설치 파일은 다음 시작 때 지웁니다.
+
+피드 형식(`web-rpa-update` 1, 모르는 칸은 무시):
+
+```json
+{
+  "format": "web-rpa-update", "formatVersion": 1,
+  "version": "0.3.0", "publishedAt": "2026-10-21T00:00:00Z",
+  "notesUrl": "https://github.com/Tak002/web-rpa/releases/tag/v0.3.0",
+  "installer": { "url": "https://…/web-rpa-setup-0.3.0.exe", "sha256": "…", "size": 30932992, "signature": "<base64 Ed25519>" },
+  "zip": { "url": "https://…/web-rpa-0.3.0-win-x64.zip", "sha256": "…", "size": 52848640 }
+}
+```
+
+서명하는 글은 UTF-8 `web-rpa-update:1\n<version>\n<sha256 소문자 hex>\n<size>` 입니다. 주소는 피드 주소 기준 상대 주소도 됩니다. 설치 파일은 300MB, 피드는 64KB 까지.
+
+### 서명 키와 릴리스 절차 (배포하는 사람)
+
+1. 처음 한 번 `node scripts\update-key.mjs` — 개인 키를 저장소 밖 `%USERPROFILE%\.web-rpa-signing\update-ed25519.pem` 에 만들고(이미 있으면 그대로 씀, `WEB_RPA_SIGNING_KEY` 로 경로 변경) 공개 키를 출력합니다. 공개 키는 `src/update.js` 의 `PUBLIC_KEYS` 에 넣습니다. `node scripts\update-key.mjs --check` 가 `공개 키 일치: 예` 여야 합니다.
+2. **개인 키를 따로 백업**하세요(암호를 건 USB·암호 관리자 등). 잃으면 지금 설치본들이 새 버전을 자동으로 받지 못하고, 공개 키를 바꾼 버전을 사용자가 한 번 직접 설치해야 합니다. 저장소·`dist`·작업 폴더·로그에 두지 마세요 — `node scripts\check-release.mjs` 가 저장소 안의 `.pem`·`.key` 파일과 Ed25519 개인 키 내용을 찾으면 실패합니다. 키를 바꿀 때는 새 공개 키를 `PUBLIC_KEYS` 에 **더한** 버전을 먼저 내고, 그다음 버전부터 새 키로 서명합니다.
+3. `package.json` 의 버전을 올리고 `node scripts\package-win.mjs --installer --smoke` — `dist\` 에 설치 파일·zip·서명한 `latest.json`·`SHA256SUMS.txt` 가 생깁니다(개인 키가 없으면 경고하고 서명 없이 씁니다 — 그 피드로는 자동 설치되지 않음). 다른 곳에 올릴 때는 `--release-base https://…/`. `--upgrade` 를 더하면 가짜 옛 버전(0.0.1)을 실제로 설치해 두고 [지금 업데이트]·시작할 때 자동 설치 두 길로 새 버전이 같은 포트에 다시 뜨는지 확인합니다.
+4. GitHub 에 태그 `v<버전>` 으로 **정식 릴리스**(pre-release 아님)를 만들고 설치 파일·zip·`latest.json`·`SHA256SUMS.txt` 를 올립니다. 설치본은 다음 시작부터 새 버전을 받습니다.
 
 ## 쓰는 순서
 
@@ -152,6 +184,7 @@ node test\loop-check.mjs [--keep] :: 반복·목록·조건 엔진과 편집 도
 node test\ai-check.mjs       :: AI 대화 저장·맥락·새 도구·대기 제안·스트리밍, 비밀값 DPAPI 저장·가리기(가짜 모델 요청·파일 어디에도 비밀값 0건), 관찰 브라우저 수명 (test\out-ai\)
 node test\ai-ui-check.mjs    :: 모든 화면의 AI 패널·화면 이동/재시작 뒤 유지·[✦ AI 에게]·편집기와 대화 레시피 어긋남 막기·실행 화면 비밀값·390px (test\out-ai-ui\)
 node test\editor-check.mjs   :: 편집기 트리·찾기·일괄·묶기·조건 편집기·변수·입력값 정리·자동완성, 목록·쪽 넘기기·로그인 분기를 화면으로 만들어 실제 실행, 리포트 카드, 390px (test\out-editor\)
+node test\update-check.mjs   :: 업데이트: 피드 형식·서명·sha256·크기·다운그레이드, 가짜 피드 + dry-run 서버(API·SSE·작업 중 거절·계획 명령줄), 실행기 자동 설치, 배너·설정 카드·390px (설치는 하지 않음, test\out-update\)
 node test\loop-fixture\server.mjs 4930 :: 반복 시험 사이트(3쪽×4행 표·상세·조건·비밀값 화면)를 띄워 직접 해 보기
 node test\usability\run.mjs [--only T1,T5] [--out 폴더] :: 사용성 평가 대본 T1–T10 (처음 쓰는 사람처럼 조작, 영상·캡처·results.json, 가짜 OpenRouter)
 ```
@@ -160,7 +193,7 @@ node test\usability\run.mjs [--only T1,T5] [--out 폴더] :: 사용성 평가 �
 
 실행 화면 영상: 실행 화면에서 "실행 화면을 동영상으로 남기기"를 켜면(API 는 `options.recordVideo: true`) 탭마다 webm 이 `runs\<실행>\video\` 에 남고 리포트 화면에서 재생됩니다.
 
-공개 전 점검: `node scripts\check-release.mjs`(비밀값·개인 경로 검사), `node scripts\notices.mjs --check`(제3자 고지 갱신), `node scripts\package-win.mjs --installer --smoke`(Node 를 함께 담은 설치 파일·zip 을 만들고 실제로 설치·실행·제거해 확인).
+공개 전 점검: `node scripts\check-release.mjs`(비밀값·개인 경로·서명 개인 키 검사), `node scripts\notices.mjs --check`(제3자 고지 갱신), `node scripts\update-key.mjs --check`(서명 키와 앱 속 공개 키가 짝인지), `node scripts\package-win.mjs --installer --smoke --upgrade`(Node 를 함께 담은 설치 파일·zip·`latest.json` 을 만들고 실제로 설치·실행·업데이트·제거해 확인).
 
 ## 알려진 제한
 
@@ -176,6 +209,7 @@ node test\usability\run.mjs [--only T1,T5] [--out 폴더] :: 사용성 평가 �
 - 비밀값 저장은 Windows 에서만 됩니다(DPAPI). AI 대화·메모는 이 PC 의 작업 폴더에만 남고 30일 지난 대화는 지워집니다(메모는 남음).
 - 인증이 없는 로컬 도구입니다. 서버는 127.0.0.1 에만 열립니다. 다른 기기에서 쓰려면 VPN 등 신뢰할 수 있는 사설망 안에서만 여세요.
 - 허브 목록은 아직 서명하지 않습니다. https 와 목록의 sha256 으로만 확인하므로, 믿는 허브 주소만 넣으세요.
+- 업데이트는 설치 파일 전체를 받습니다(차등 업데이트 없음). 설치 파일 자체에는 Windows 코드 서명(Authenticode)이 없고, 앱이 Ed25519 서명으로 확인합니다. 새 버전 확인은 시작할 때와 [지금 확인] 때만 합니다(켜 둔 채 주기적으로 확인하지 않음). 되돌리기(이전 버전으로)는 이전 설치 파일을 직접 설치합니다.
 - 세트 사이트 제한은 페이지 이동만 막습니다(그림·스크립트 같은 하위 자원과 iframe 은 막지 않음). 리디렉션으로 넘어간 경우는 넘어간 뒤 알아채 빈 페이지로 돌리고 그 행을 실패로 남깁니다. AI 도우미의 화면 관찰에는 적용하지 않습니다.
 - 서버는 IP 주소나 `localhost` 로 접속한 요청만 받고, 다른 웹사이트가 보낸 요청은 거절합니다. 컴퓨터 이름(예: `mypc.tailnet.ts.net`)으로 접속하려면 `--allow-host 이름`(또는 환경 변수 `WEB_RPA_ALLOWED_HOSTS`)으로 허용해 주세요.
 

@@ -2,6 +2,7 @@ import { stepText, STEP_LABELS } from '/shared/steps.js';
 import { h, add, mount, fmtTime, fmtDur, statusBadge, toast, api, safely, download, uploadFile, live, onLive, emitLive, connect } from '/ui.js';
 import { initAiPanel, setAiScope, setAiRecipe, setAiContext, aiAskButton, getAiRecipe, toggleAi } from '/ai-panel.js';
 import { editorPage } from '/editor.js';
+import { initUpdate, updateCard } from '/update.js';
 
 const app = document.getElementById('app');
 
@@ -767,7 +768,7 @@ async function settingsPage() {
   const draw = async () => {
     const s = await api('GET', '/api/settings').catch((e) => (toast(e.message, 'error'), null));
     if (!s) return;
-    mount(box, browserCard(s.browser, draw), hubSourcesCard(s, draw), aiCard(s.openrouter, draw));
+    mount(box, browserCard(s.browser, draw), hubSourcesCard(s, draw), aiCard(s.openrouter, draw), s.update ? updateCard(s.update, draw) : null);
   };
   await draw();
 }
@@ -1671,5 +1672,6 @@ function hubSourcesCard(s, redraw) {
 
 // ---------- 시작 ----------
 initAiPanel();
+initUpdate();
 connect();
 route();

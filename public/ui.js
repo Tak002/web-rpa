@@ -114,7 +114,7 @@ export function connect() {
       emitLive(t, d);
     });
   }
-  for (const t of ['agent-progress', 'agent-delta', 'agent-done']) es.addEventListener(t, (e) => emitLive(t, JSON.parse(e.data)));
+  for (const t of ['agent-progress', 'agent-delta', 'agent-done', 'update']) es.addEventListener(t, (e) => emitLive(t, JSON.parse(e.data)));
   es.addEventListener('notice', (e) => {
     const d = JSON.parse(e.data);
     toast(d.message, d.level === 'error' ? 'error' : 'info');

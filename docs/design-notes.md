@@ -29,6 +29,8 @@
 | `src/set/*` | 진행 세트: `core.mjs`·`zip.mjs`(허브 CI 와 같은 파일), `folder.mjs`(폴더 묶기), `index.js`(내보내기·검사·설치), `hub.js`(허브 목록·내려받기) |
 | `src/engine/sites.js` | 설치한 세트의 사이트 제한 (실행기가 쓴다) |
 | `src/cli.js` | 명령줄 (`set …`, `hub …`) |
+| `src/update.js`, `public/update.js` | 새 버전 확인·설치: 피드·서명·내려받기·대기 스크립트·실행기 자동 설치·서버 상태(`Updater`), 화면 배너·설정 카드 (15절) |
+| `scripts/update-key.mjs` | 업데이트 서명 키(Ed25519) 만들기·`--check` — 개인 키는 저장소 밖 |
 
 ## 2. 녹화
 
@@ -167,7 +169,19 @@
 - **휴대폰(760px 이하)**: 리포트 행은 카드(`data-label`), 일괄 막대는 자주 쓰는 단추 + [더보기], 체크 누르는 영역 40px, 로그인 안내는 한 줄 요약. 390px 에서 가로 스크롤이 없는 것을 시험한다.
 - **시험이 기대는 이름**: 편집기 머리 `✦ AI 도우미` 는 편집기 화면에 하나뿐이어야 한다(agent-mock 의 부분 일치 검색). 위쪽 막대 단추는 그래서 "✦ AI 대화". 패널 안에서는 `.badge.ok/.bad` 를 쓰지 않는다(set-check·settings-check).
 
-## 15. 빠진 것·알려진 한계
+## 15. 업데이트 (0.2.1)
+
+- **한 모듈**: `src/update.js` 가 설치 형태 판별·피드 읽기·버전 비교·서명 확인·내려받기·대기 스크립트·실행기 자동 설치·서버 상태(`Updater`)를 모두 맡는다. 실행기(`launch.js`)는 서버를 띄우기 **전에** `updateAtLaunch`, 서버는 `GET /api/update`·`POST /api/update/check`·`POST /api/update/install` 과 SSE `update`. 의존성 없음(`node:crypto` Ed25519).
+- **설치 형태**: `<앱>\..\unins000.exe` 와 `<앱>\..\node\node.exe` 가 있으면 `installer`, node 만 있으면 `portable`(압축본), 그 밖은 `source`. 자동 설치는 `installer` 만, `portable` 은 내려받기 페이지 안내, `source` 는 확인하지 않는다(`WEB_RPA_UPDATE_URL` 을 주면 확인).
+- **검증 순서**: 피드(https, 64KB, 5초, 모르는 칸 버림) → 새 버전인지(`cmpSemver` 로 더 높을 때만) → 서명(`web-rpa-update:1\n버전\nsha256\n크기` 에 대한 Ed25519, 앱 속 `PUBLIC_KEYS` 중 하나) → 스트림으로 받으며 크기 상한(피드 크기·300MB)과 sha256 → `.part` 를 이름 바꿈. 하나라도 틀리면 받은 파일을 지운다. 서명이 내려받기 **전에** 맞아야 하므로 서명 없는 피드는 아예 받지 않는다. 같은 파일을 받아 두었고 sha256 이 맞으면 다시 받지 않는다.
+- **시작할 때 자동 설치가 기본**인 까닭: 사용자가 "시작할 때 새 버전이 있으면 새 버전으로 설치" 를 원했다. 실행기는 서버를 띄우기 전에 하므로 녹화·실행·AI 작업이 있을 수 없다. 실행기가 확인한 결과(`checked`)는 `setLaunchInfo` 로 같은 프로세스의 서버에 넘겨 서버가 피드를 두 번 받지 않는다. 자동 설치를 끄면 서버가 listen 뒤 비동기로 확인해 배너를 띄운다.
+- **적용**: 실행 중인 `node.exe` 는 잠겨 있어 설치 파일이 바꿀 수 없다 → 대기 스크립트(`updates\update-<버전>.ps1`, UTF-8 BOM)가 PID 종료를 60초까지 기다렸다가 `setup /SILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /DIR=<지금 설치 폴더> /LOG=<updates\setup-<버전>.log>` → 원래 실행 인자로 `launch.js` 를 다시 띄우고 `update-log.txt` 에 줄을 남긴다. 화면의 [지금 업데이트] 는 `--no-open` 을 더해 다시 띄운다(열린 탭이 서버가 돌아오면 새로 고친다). 원래 실행기에 콘솔이 없었으면(시험·숨김 실행) 다시 띄울 때도 창을 숨긴다.
+- **PowerShell 띄우기**: Windows PowerShell 은 콘솔 없이(`DETACHED_PROCESS` = Node 의 `detached: true`) 띄우면 스크립트를 돌리지 않고 곧바로 0 으로 끝난다(이 PC 에서 확인). 그냥 자식으로 띄우면 libuv 가 자식을 kill-on-close 작업 개체에 넣어 Node 가 끝날 때 함께 죽는다. 그래서 잠깐 도는 숨긴 PowerShell(`windowsHide`, 숨은 콘솔) 이 `Start-Process -WindowStyle Hidden` 으로 대기 스크립트를 띄우고 끝난다 — 손자는 그 작업 개체에서 조용히 빠지고(SILENT_BREAKAWAY_OK) 자기 콘솔을 숨긴 채 받는다. 작업 폴더는 앱 폴더를 붙잡지 않게 `updates\`.
+- **설치 파일**: `[InstallDelete]` 로 `{app}\node`·`{app}\app` 을 지우고 새로 깐다(옛 버전에만 있던 모듈이 남지 않게). `{app}\app\src\launch.js` 가 있는 폴더(web-rpa 가 깔린 폴더)일 때만 — 사용자가 고른 다른 폴더의 `app` 을 지우지 않게. 확인에 `app` 을 쓰므로 `node` 를 먼저 지운다. 작업 데이터(`%LOCALAPPDATA%\web-rpa`)는 건드리지 않는다.
+- **작업 중 거절**: `POST /api/update/install` 은 `busy()`(녹화·실행·AI 관찰)면 409. 설치를 준비하는 동안은 `busy()` 가 "새 버전을 설치하는 중" 을 돌려줘 새 녹화·실행을 막는다. 응답을 보낸 뒤(`finish`) 관찰 브라우저를 닫고 대기 스크립트를 띄운 다음 끝난다.
+- **시험**: `WEB_RPA_UPDATE_URL`(피드)·`WEB_RPA_UPDATE_PUBKEY`(공개 키)·`WEB_RPA_UPDATE_KIND`(설치 형태)·`WEB_RPA_UPDATE_DRYRUN=<파일>`(실행·종료 대신 계획 JSON). `test/update-check.mjs` 는 dry-run 으로, `package-win.mjs --upgrade` 는 메모리에만 있는 시험 키로 서명한 로컬 피드로 실제 설치까지 한다. 서명 개인 키는 저장소 밖(`scripts/update-key.mjs`), `check-release.mjs` 가 저장소·dist·workspace 의 키 파일·키 내용을 찾으면 실패.
+
+## 16. 빠진 것·알려진 한계
 
 - 숨김 모드의 사용자 에이전트에는 `HeadlessChrome` 이 그대로 남는다(바꾸려면 버전을 알아야 해 실행을 두 번 해야 한다). 숨김 브라우저를 막는 사이트는 화면 표시 모드로 실행해야 한다.
 - 다른 출처(cross-origin) iframe 안에서 뜬 알림창은 그 문서의 갈고리로만 잡힌다. 페이지가 `alert` 를 미리 다른 이름으로 저장해 두면 녹화에서 놓칠 수 있다.

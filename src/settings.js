@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { BROWSERS, detectBrowsers, profileNameFor } from './browser.js';
 import { checkHubUrl } from './set/hub.js';
+import { updateConfigOf, checkUpdateUrl, DEFAULT_FEED_URL } from './update.js';
 
 export const DEFAULT_MODEL = 'anthropic/claude-sonnet-5.5';
 export const MODEL_CHOICES = [
@@ -48,6 +49,11 @@ export class Settings {
     return Array.isArray(list) ? list.filter((s) => s && typeof s.url === 'string') : [DEFAULT_HUB];
   }
 
+  /** 새 버전 확인·자동 설치 { check, auto, feedUrl } — 기본값은 update.js 의 UPDATE_DEFAULTS (자동 설치 켜짐) */
+  get updateConfig() {
+    return updateConfigOf(this.data);
+  }
+
   /** 화면에 보낼 공개 정보 (키는 끝 4자리만). */
   publicView() {
     const o = this.openrouter;
@@ -59,6 +65,7 @@ export class Settings {
       hubDefault: DEFAULT_HUB,
       // 비밀값 "이 PC 에 저장" 은 Windows 계정 암호화(DPAPI)를 쓴다
       secrets: { available: process.platform === 'win32' },
+      update: { ...this.updateConfig, feedDefault: DEFAULT_FEED_URL, feedFromEnv: !!process.env.WEB_RPA_UPDATE_URL },
     };
   }
 
@@ -74,6 +81,29 @@ export class Settings {
         hubSources.push({ name: String(s?.name ?? '').trim().slice(0, 60) || new URL(url).host, url });
       }
     }
+    // 업데이트 설정도 먼저 검사한다
+    let update;
+    if (patch?.update !== undefined) {
+      const u = patch.update;
+      if (!u || typeof u !== 'object' || Array.isArray(u)) throw Object.assign(new Error('업데이트 설정 형식이 아닙니다.'), { status: 400 });
+      update = { ...(this.data.update && typeof this.data.update === 'object' ? this.data.update : {}) };
+      for (const k of ['check', 'auto']) {
+        if (u[k] === undefined) continue;
+        if (typeof u[k] !== 'boolean') throw Object.assign(new Error(`update.${k} 는 true/false 여야 합니다.`), { status: 400 });
+        update[k] = u[k];
+      }
+      if (u.feedUrl !== undefined) {
+        const f = String(u.feedUrl ?? '').trim();
+        if (!f || f === DEFAULT_FEED_URL) delete update.feedUrl; // 빈 값 = 기본 피드
+        else {
+          try {
+            update.feedUrl = checkUpdateUrl(f);
+          } catch (e) {
+            throw Object.assign(new Error(e.message), { status: 400 });
+          }
+        }
+      }
+    }
     if (patch?.browser) {
       const id = String(patch.browser.id ?? '');
       if (!BROWSERS.some((b) => b.id === id)) throw Object.assign(new Error(`알 수 없는 브라우저: ${id}`), { status: 400 });
@@ -82,6 +112,7 @@ export class Settings {
       this.data.browser = id === 'custom' ? { id, path: p } : { id, ...(this.data.browser?.path ? { path: this.data.browser.path } : {}) };
     }
     if (hubSources) this.data.hubSources = hubSources;
+    if (update) this.data.update = update;
     const o ={ ...(this.data.openrouter ?? {}) };
     if (patch?.openrouter) {
       if (typeof patch.openrouter.apiKey === 'string') {

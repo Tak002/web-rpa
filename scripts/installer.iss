@@ -11,6 +11,9 @@
 #ifndef OutDir
   #define OutDir "."
 #endif
+#ifndef Compression
+  #define Compression "lzma2/max"
+#endif
 
 [Setup]
 AppId={{6E3B8C2A-41F7-4D5B-9A0E-2F5D9E7A1C30}
@@ -27,7 +30,7 @@ OutputBaseFilename=web-rpa-setup-{#Version}
 SetupIconFile={#Stage}\web-rpa.ico
 UninstallDisplayIcon={app}\web-rpa.ico
 UninstallDisplayName=web-rpa
-Compression=lzma2/max
+Compression={#Compression}
 SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
@@ -41,6 +44,12 @@ Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
 [Tasks]
 Name: "desktopicon"; Description: "바탕화면에 바로가기 만들기"; GroupDescription: "바로가기:"
 
+[InstallDelete]
+; 새 버전을 덮어 설치할 때 옛 버전에만 있던 파일(지운 모듈 등)이 남지 않게 앱·Node 폴더를 비우고 새로 깐다.
+; 작업 데이터(%LOCALAPPDATA%\web-rpa)는 건드리지 않는다. web-rpa 가 깔린 폴더일 때만 지운다 (node 를 먼저 — 확인에 app 을 쓴다).
+Type: filesandordirs; Name: "{app}\node"; Check: IsWebRpaDir
+Type: filesandordirs; Name: "{app}\app"; Check: IsWebRpaDir
+
 [Files]
 Source: "{#Stage}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
@@ -53,3 +62,9 @@ Filename: "{app}\node\node.exe"; Parameters: """{app}\app\src\launch.js"""; Work
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
+
+[Code]
+function IsWebRpaDir(): Boolean;
+begin
+  Result := FileExists(ExpandConstant('{app}\app\src\launch.js'));
+end;

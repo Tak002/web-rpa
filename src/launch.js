@@ -1,10 +1,12 @@
 // 바로가기·설치본에서 쓰는 실행기: 이미 떠 있으면 화면만 열고, 아니면 서버를 띄운 뒤 화면을 연다.
 // 실행: node src/launch.js [--port 4800] [--workspace 폴더] [--no-open]
 //   작업 폴더 기본값은 %LOCALAPPDATA%\web-rpa — 다시 설치하거나 지워도 레시피·실행 결과가 남는다.
+//   설치본이고 설정의 "시작할 때 자동 설치"가 켜져 있으면(기본) 서버를 띄우기 전에 새 버전을 확인해 설치한다 (src/update.js).
 
 import { spawn } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
+import { updateAtLaunch, setLaunchInfo } from './update.js';
 
 const args = process.argv.slice(2);
 const argOf = (name, def) => {
@@ -53,6 +55,11 @@ if (who === 'web-rpa') {
   process.exit(0);
 }
 if (who === 'other') await fail(`포트 ${port} 를 다른 프로그램이 쓰고 있습니다. 그 프로그램을 끄거나 --port 로 다른 번호를 지정해 주세요.`);
+
+// 새 버전이 있으면 여기서 설치하고 끝난다 (설치 뒤 같은 인자로 다시 뜬다). 실패하면 지금 버전으로 계속.
+const relaunch = { file: process.execPath, args: [path.join(import.meta.dirname, 'launch.js'), ...args], cwd: process.cwd(), hidden: !process.stdout.isTTY };
+const checked = await updateAtLaunch({ workspace, relaunch }).catch((e) => (console.log(`새 버전 확인 중 오류: ${e.message}`), null));
+setLaunchInfo({ ...relaunch, checked });
 
 process.argv = [process.argv[0], path.join(import.meta.dirname, 'server.js'), '--port', String(port), '--workspace', workspace];
 await import('./server.js');

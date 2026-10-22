@@ -76,6 +76,17 @@ code { background: var(--code); padding: 1px 5px; border-radius: 4px; }
 .pill.run { color: var(--accent); background: var(--accent-soft); }
 @keyframes blink { 50% { opacity: 0.25; } }
 
+/* ---------- 새 버전 안내 (모든 화면 위) ---------- */
+.update-banner { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 8px 24px; background: var(--accent-soft); color: var(--text); border-bottom: 1px solid var(--line); font-size: 13.5px; }
+.update-banner[hidden] { display: none; }
+.update-banner .ub-text { flex: 1 1 280px; min-width: 0; overflow-wrap: anywhere; }
+.update-banner .ub-why { color: var(--muted); }
+.update-banner .ub-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.update-banner .ub-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: blink 1.2s infinite; flex: none; }
+.update-card .update-check { align-items: flex-start; }
+.update-card .update-check input { margin-top: 3px; flex: none; }
+.update-card .update-status { overflow-wrap: anywhere; }
+
 main { max-width: 1120px; margin: 0 auto; padding: 24px 24px 80px; }
 h1 { font-size: 22px; margin: 0; }
 h2 { font-size: 17px; margin: 0 0 12px; }
@@ -413,6 +424,7 @@ button.link.danger { color: var(--bad); }
 
 @media (max-width: 760px) {
   .top { flex-wrap: wrap; gap: 8px 12px; padding: 10px 16px; }
+  .update-banner { padding: 8px 16px; }
   .brand small { display: none; }
   #live { margin-left: 0; order: 3; }
   #live:empty { display: none; }

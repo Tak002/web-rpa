@@ -20,6 +20,7 @@ import { ThreadStore } from './ai/thread.js';
 import { secretVariablesOf } from './secrets.js';
 import { setDraft, buildSet, inspectSet, publicPreview, installSet, installedSets, readSet, ENGINE_VERSION } from './set/index.js';
 import { hubList, hubReadme, resolveHubSet, downloadHubSet } from './set/hub.js';
+import { Updater, getLaunchInfo, cleanupUpdates } from './update.js';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -58,6 +59,9 @@ function broadcast(type, data) {
   for (const res of clients) res.write(msg);
 }
 
+// 새 버전 확인·설치. 실행기(launch.js)가 시작할 때 이미 확인했으면 그 결과를 쓴다.
+const updater = new Updater({ workspace: store.root, config: () => settings.updateConfig, onChange: (v) => broadcast('update', v), initial: getLaunchInfo()?.checked });
+
 const agents = new Map(); // recipeId → AgentSession (대화는 레시피 단위)
 const sessionAlias = new Map(); // 옛 화면의 sessionId → recipeId
 let agentTurns = 0; // 진행 중인 AI 턴 (화면 관찰 브라우저가 같은 프로필을 쓴다)
@@ -94,7 +98,7 @@ function browserBusy() {
   return null;
 }
 function busy() {
-  return browserBusy() ?? (agentTurns > 0 ? 'AI 도우미가 화면을 확인하는 중입니다. 답변이 끝난 뒤 다시 시도해 주세요.' : null);
+  return browserBusy() ?? (agentTurns > 0 ? 'AI 도우미가 화면을 확인하는 중입니다. 답변이 끝난 뒤 다시 시도해 주세요.' : null) ?? (updater.installing ? '새 버전을 설치하는 중입니다. 설치가 끝나면 web-rpa 가 다시 열립니다.' : null);
 }
 
 function publicState() {
@@ -470,6 +474,38 @@ route('POST', '/api/settings/test-browser', async () => {
   }
 });
 
+// ---------- 새 버전 (업데이트) ----------
+route('GET', '/api/update', () => updater.view());
+route('POST', '/api/update/check', () => updater.check());
+route('POST', '/api/update/install', async ({ res }) => {
+  let plan;
+  try {
+    plan = await updater.prepareInstall({ busy, relaunch: relaunchCommand() });
+  } catch (e) {
+    send(res, e.status ?? 500, { error: e.message, code: e.code ?? null });
+    return undefined;
+  }
+  // 응답을 보낸 뒤에 대기 스크립트를 띄우고 끝낸다 (실행 중인 node.exe 는 설치 파일이 바꿀 수 없다)
+  res.on('finish', async () => {
+    try {
+      await closeObservers();
+      const r = await updater.apply(plan);
+      if (r.dryRun) return;
+      console.log(`새 버전 ${plan.to} 을(를) 설치합니다. 설치가 끝나면 web-rpa 가 다시 열립니다.`);
+      setTimeout(() => process.exit(0), 300);
+    } catch (e) {
+      console.error(`업데이트를 시작하지 못했습니다: ${e.message}`);
+    }
+  });
+  return { ok: true, version: plan.to, from: plan.from, dryRun: !!process.env.WEB_RPA_UPDATE_DRYRUN };
+});
+/** 설치가 끝난 뒤 다시 띄울 명령: 실행기가 남긴 원래 인자 + --no-open (화면은 지금 열린 탭이 새로 고친다) */
+function relaunchCommand() {
+  const info = getLaunchInfo();
+  const base = info ?? { file: process.execPath, args: [path.join(ROOT, 'src', 'launch.js'), '--port', String(PORT), '--workspace', store.root], cwd: ROOT, hidden: !process.stdout.isTTY };
+  return { ...base, args: base.args.includes('--no-open') ? base.args : [...base.args, '--no-open'] };
+}
+
 // ---------- AI 도우미 대화 (레시피 단위, 파일로 남는다) ----------
 const recipeIdOf = (v) => {
   const id = typeof v === 'string' ? v : '';
@@ -638,6 +674,9 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`web-rpa ${ENGINE_VERSION} 실행 중: http://${HOST}:${PORT}  (작업 폴더: ${store.root})`);
+  // 새 버전 확인은 시작을 막지 않는다 (실패는 상태에만 남는다)
+  cleanupUpdates(store.root).catch(() => {});
+  if (updater.enabled && !updater.checkedAt) updater.check().catch(() => {});
 });
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
