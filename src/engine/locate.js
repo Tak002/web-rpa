@@ -1,8 +1,9 @@
 // 요소 찾기: 후보를 점수 순서로 시도해 정확히 하나만 맞는 후보를 쓴다. 보이는 요소를 우선하고,
 // 프레임 경로를 따라가되 깨졌으면 모든 프레임 합계로 유일성을 본다. 지금 탭에 없으면 다른 탭도 본다.
+// within: 'item' 대상은 지금 목록 항목(forEach) 안에서만 찾고, 목록(items)은 보이는 요소가 1개 이상 맞는 첫 후보로 센다.
 
-import { resolveFramePath } from '../browser.js';
-import { targetText } from '../../public/shared/steps.js';
+import { resolveFramePath, framePathOf } from '../browser.js';
+import { targetText, withJosa } from '../../public/shared/steps.js';
 
 const POLL_MS = 200;
 const HIDDEN_GRACE_MS = 2500; // 숨은 요소는 이만큼 기다려도 보이는 것이 없을 때만 쓴다
@@ -148,22 +149,95 @@ async function searchOtherTabs(sess, current, target, cands, filter) {
   return found.length === 1 ? found[0] : null;
 }
 
-function describeMiss(target, cands, counts) {
+/** 로그인 칸처럼 보이는 대상 (못 찾으면 "이미 로그인돼 있을 수 있다" 고 알린다) */
+const loginLike = (t) => t?.meta?.type === 'password' || /아이디|비밀번호|패스워드|password|login|로그인|user ?id|\bid\b/i.test(`${t?.meta?.label ?? ''} ${t?.meta?.name ?? ''} ${t?.meta?.placeholder ?? ''}`);
+
+/**
+ * 못 찾은 오류 문장: 첫 줄은 쉬운 문장("조회" 버튼을 화면에서 찾지 못했습니다), 둘째 줄부터 자세히(시도한 후보와 개수).
+ * 리포트는 첫 줄을 보이고 나머지는 [자세히] 에 접어 둔다.
+ */
+function describeMiss(target, cands, counts, where = '') {
   const parts = cands.slice(0, 6).map((c, i) => {
     const v = c.kind === 'text' ? `<${c.value.tag}>"${c.value.text}"` : c.value;
     const n = counts?.[i];
     const cnt = !n ? '?' : n.error ? '선택자 오류' : n.total === n.visible ? `${n.total}개` : `${n.total}개(보이는 것 ${n.visible})`;
     return `${c.kind} ${String(v).slice(0, 80)} → ${cnt}`;
   });
-  return `요소를 찾지 못했습니다: ${targetText(target)}. 시도한 후보: ${parts.join(' · ')}`;
+  const many = counts?.some((n) => n && !n.error && n.visible > 1);
+  const why = loginLike(target)
+    ? ' 이미 로그인돼 있어 로그인 화면이 나오지 않았을 수 있습니다.'
+    : many
+      ? ' 같은 모양의 요소가 여러 개라 하나로 정하지 못했습니다.'
+      : ' 화면이 바뀌었거나 아직 뜨지 않았을 수 있습니다.';
+  return `${withJosa(targetText(target), '을', '를')} 화면에서 찾지 못했습니다${where ? ` (${where})` : ''}.${why}\n자세히 — 시도한 후보: ${parts.join(' · ')}`;
+}
+
+/** 목록 항목 문맥의 프레임 (화면이 다시 그려지거나 뒤로 가도 다시 찾는다) */
+export function itemFrame(item) {
+  if (!item?.page || item.page.isClosed()) return null;
+  return item.framePath?.length ? resolveFramePath(item.page, item.framePath) : item.page.mainFrame();
+}
+
+async function handleInItem(page, frame, chain, cand, hidden) {
+  try {
+    const h = await frame.evaluateHandle(([ch, c, vis]) => window.__webRpa && window.__webRpa.pickIn(ch, c, vis), [chain, cand, !hidden]);
+    const el = h.asElement();
+    if (!el) {
+      await h.dispose();
+      return null;
+    }
+    return { page, frame, handle: el, cand, hidden };
+  } catch {
+    return null;
+  }
+}
+
+/** within: 'item' 대상 — 지금 목록 항목(forEach) 요소 안에서만 찾는다. 후보는 항목 기준 상대 선택자다. */
+async function locateInItem(sess, target, scope, { timeout, purpose, extras, allowText }) {
+  const item = scope.currentItem?.();
+  if (!item) throw new Error(`"항목 안에서 찾기" 대상은 목록의 항목마다(forEach) 몸통 안에서만 쓸 수 있습니다: ${targetText(target)}`);
+  // 덧붙이는 후보 중 문서 전체를 보는 XPath(라벨로 찾기)는 항목 밖을 가리킬 수 있어 뺀다
+  const cands = prepareCandidates(target, scope, { extras: extras && purpose !== 'exists', allowText }).filter((c) => !(c.extra && c.kind === 'xpath'));
+  if (!cands.length) throw new Error('대상 요소의 후보 선택자가 모두 비어 있습니다.');
+  const deadline = Date.now() + Math.max(0, timeout);
+  let hiddenSince = null;
+  let counts = null;
+  for (;;) {
+    sess.checkAbort();
+    if (item.page.isClosed()) throw new Error('목록이 있던 창이 닫혀 항목 안의 요소를 찾을 수 없습니다.');
+    const frame = itemFrame(item);
+    const r = frame ? await sess.callLib(frame, 'countIn', item.chain, cands).catch(() => null) : null;
+    if (r?.counts) {
+      counts = r.counts;
+      const vi = counts.findIndex((n) => n.visible === 1);
+      if (vi >= 0) {
+        const got = await handleInItem(item.page, frame, item.chain, cands[vi], false);
+        if (got) return got;
+      }
+      const hi = vi >= 0 ? -1 : counts.findIndex((n) => n.total === 1);
+      if (hi >= 0) {
+        hiddenSince ??= Date.now();
+        if (Date.now() - hiddenSince >= HIDDEN_GRACE_MS || Date.now() >= deadline) {
+          const got = await handleInItem(item.page, frame, item.chain, cands[hi], true);
+          if (got) return got;
+        }
+      } else hiddenSince = null;
+    }
+    if (Date.now() >= deadline) {
+      const where = r?.missing || !r ? `목록의 ${item.index}번째 항목이 화면에 없습니다` : `목록의 ${item.index}번째 항목 안에서`;
+      throw new NotFoundError(describeMiss(target, cands, counts, where));
+    }
+    await sleep(Math.min(POLL_MS, Math.max(0, deadline - Date.now())));
+  }
 }
 
 /**
- * 대상 요소를 찾는다.
+ * 대상 요소를 찾는다. target.within === 'item' 이면 지금 목록 항목 안에서만 찾는다.
  * @returns {Promise<{page, frame, handle, cand, hidden: boolean}>}
  */
 export async function locate(sess, target, scope, { timeout = 10000, purpose = 'act', pageUrl, extras = true, allowText = true } = {}) {
   if (!target || !Array.isArray(target.candidates) || !target.candidates.length) throw new Error('대상 요소 정보(후보 선택자)가 없습니다.');
+  if (target.within === 'item') return locateInItem(sess, target, scope, { timeout, purpose, extras, allowText });
   const cands = prepareCandidates(target, scope, { extras: extras && purpose !== 'exists', allowText });
   if (!cands.length) throw new Error('대상 요소의 후보 선택자가 모두 비어 있습니다.');
   const deadline = Date.now() + Math.max(0, timeout);
@@ -214,4 +288,40 @@ export async function locate(sess, target, scope, { timeout = 10000, purpose = '
     }
     await sleep(Math.min(POLL_MS, Math.max(0, deadline - Date.now())));
   }
+}
+
+/**
+ * 여러 요소의 목록을 찾는다 (forEach 의 items · elementCount). 후보를 점수 순으로 보고, 보이는 요소가 1개 이상 맞는 첫 후보를 쓴다.
+ * target.within === 'item' 이면 바깥 목록 항목(outer) 안에서 센다.
+ * @returns {Promise<{count: number, cand?: object, page?: object, framePath?: object[], chain?: object[]}>}
+ */
+export async function findList(sess, target, scope, { outer } = {}) {
+  if (!target || !Array.isArray(target.candidates) || !target.candidates.length) throw new Error('목록 요소 정보(후보 선택자)가 없습니다.');
+  const cands = prepareCandidates(target, scope, { extras: false });
+  if (!cands.length) throw new Error('목록 요소의 후보 선택자가 모두 비어 있습니다.');
+  if (target.within === 'item') {
+    if (!outer) throw new Error(`"항목 안에서 찾기" 목록은 다른 목록의 항목마다(forEach) 몸통 안에서만 쓸 수 있습니다: ${targetText(target)}`);
+    const frame = itemFrame(outer);
+    const r = frame ? await sess.callLib(frame, 'countIn', outer.chain, cands).catch(() => null) : null;
+    const i = r?.counts ? r.counts.findIndex((n) => n.visible >= 1) : -1;
+    if (i < 0) return { count: 0 };
+    return { count: r.counts[i].visible, cand: cands[i], page: outer.page, framePath: outer.framePath ?? [], chain: outer.chain };
+  }
+  const page = await sess.livePage();
+  const resolved = target.framePath?.length ? resolveFramePath(page, target.framePath) : null;
+  const frames = resolved ? [resolved] : page.frames();
+  const per = await Promise.all(frames.map((f) => sess.callLib(f, 'count', cands).catch(() => null)));
+  for (let i = 0; i < cands.length; i += 1) {
+    let best = -1;
+    let n = 0;
+    per.forEach((r, j) => {
+      const v = r?.[i]?.visible ?? 0;
+      if (v > n) {
+        n = v;
+        best = j;
+      }
+    });
+    if (best >= 0) return { count: n, cand: cands[i], page, framePath: framePathOf(frames[best]), chain: [] };
+  }
+  return { count: 0 };
 }

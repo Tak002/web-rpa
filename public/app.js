@@ -1,136 +1,13 @@
-import { stepText, STEP_LABELS, targetText } from '/shared/steps.js';
+import { stepText, STEP_LABELS } from '/shared/steps.js';
+import { h, add, mount, fmtTime, fmtDur, statusBadge, toast, api, safely, download, uploadFile, live, onLive, emitLive, connect } from '/ui.js';
+import { initAiPanel, setAiScope, setAiRecipe, setAiContext, aiAskButton, getAiRecipe, toggleAi } from '/ai-panel.js';
+import { editorPage } from '/editor.js';
 
-// ---------- 작은 DOM 도우미 ----------
-function h(tag, props, ...children) {
-  const el = document.createElement(tag);
-  for (const [k, v] of Object.entries(props ?? {})) {
-    if (v === undefined || v === null || v === false) continue;
-    if (k === 'class') el.className = v;
-    else if (k === 'style') el.style.cssText = v;
-    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
-    else if (k === 'value') el.value = v;
-    else if (k === 'checked') el.checked = !!v;
-    else if (k === 'disabled') el.disabled = !!v;
-    else el.setAttribute(k, v === true ? '' : v);
-  }
-  for (const c of children.flat(Infinity)) {
-    if (c === null || c === undefined || c === false) continue;
-    el.append(c instanceof Node ? c : document.createTextNode(String(c)));
-  }
-  return el;
-}
 const app = document.getElementById('app');
-// append/replaceChildren 에 null 을 넘기면 "null" 글자가 들어가므로 빈 값을 걸러서 넣는다.
-const clean = (kids) => kids.flat(Infinity).filter((k) => k !== null && k !== undefined && k !== false);
-const add = (el, ...kids) => el.append(...clean(kids));
-const mount = (el, ...kids) => el.replaceChildren(...clean(kids));
-const fmtTime = (iso) => (iso ? new Date(iso).toLocaleString('ko-KR', { dateStyle: 'short', timeStyle: 'medium' }) : '');
-const fmtDur = (ms) => (ms === undefined ? '' : ms < 60000 ? `${(ms / 1000).toFixed(1)}초` : `${Math.floor(ms / 60000)}분 ${Math.round((ms % 60000) / 1000)}초`);
-const STATUS = { running: ['실행 중', 'acc'], paused: ['일시정지', 'warn'], 'waiting-user': ['확인 대기', 'warn'], done: ['완료', 'ok'], failed: ['실패 있음', 'bad'], stopped: ['중지됨', ''], idle: ['준비', ''] };
-const statusBadge = (s) => h('span', { class: `badge ${STATUS[s]?.[1] ?? ''}` }, STATUS[s]?.[0] ?? s);
-
-function toast(message, kind = 'info') {
-  const t = h('div', { class: `toast ${kind}` }, message);
-  document.getElementById('toasts').append(t);
-  setTimeout(() => t.remove(), kind === 'error' ? 8000 : 3500);
-}
-
-async function api(method, url, body, { raw = false } = {}) {
-  const res = await fetch(url, {
-    method,
-    headers: body !== undefined && !raw ? { 'content-type': 'application/json' } : undefined,
-    body: body === undefined ? undefined : raw ? body : JSON.stringify(body),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `요청 실패 (${res.status})`);
-  return data;
-}
-const safely = (fn) => async (...a) => {
-  try {
-    return await fn(...a);
-  } catch (e) {
-    toast(e.message, 'error');
-    return undefined;
-  }
-};
-function download(name, text) {
-  const a = h('a', { href: URL.createObjectURL(new Blob([text], { type: 'application/json' })), download: name });
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-}
-async function uploadFile(file) {
-  return api('POST', `/api/uploads?name=${encodeURIComponent(file.name)}`, file, { raw: true });
-}
-
-// ---------- 서버 상태 (SSE) ----------
-const live = { recording: null, run: null, log: [] };
-const listeners = new Set();
-function onLive(fn) {
-  listeners.add(fn);
-  return () => listeners.delete(fn);
-}
-function emitLive(type, data) {
-  for (const fn of listeners) fn(type, data);
-  renderLivePill();
-}
-function connect() {
-  const es = new EventSource('/api/events');
-  es.addEventListener('state', (e) => {
-    const s = JSON.parse(e.data);
-    live.recording = s.recording;
-    live.run = s.run;
-    live.log = s.run?.log ?? [];
-    emitLive('state', s);
-  });
-  es.addEventListener('recording', (e) => {
-    live.recording = JSON.parse(e.data);
-    emitLive('recording', live.recording);
-  });
-  for (const t of ['run-log', 'run-status', 'run-progress', 'run-step', 'run-row']) {
-    es.addEventListener(t, (e) => {
-      const d = JSON.parse(e.data);
-      if (!live.run || live.run.runId !== d.runId) live.run = { runId: d.runId, status: 'running' };
-      if (t === 'run-log') {
-        live.log.push(d.line);
-        if (live.log.length > 2000) live.log = live.log.slice(-1500);
-      }
-      if (t === 'run-status') {
-        live.run.status = d.status;
-        live.run.waiting = d.status === 'waiting-user' ? d.message : null;
-      }
-      if (t === 'run-progress') live.run.progress = d;
-      if (t === 'run-step') live.run.current = d;
-      if (t === 'run-row') live.run.row = d;
-      emitLive(t, d);
-    });
-  }
-  es.addEventListener('agent-progress', (e) => emitLive('agent-progress', JSON.parse(e.data)));
-  es.addEventListener('notice', (e) => {
-    const d = JSON.parse(e.data);
-    toast(d.message, d.level === 'error' ? 'error' : 'info');
-  });
-  es.onerror = () => {
-    es.close();
-    setTimeout(connect, 2000);
-  };
-}
-
-function renderLivePill() {
-  const box = document.getElementById('live');
-  mount(box);
-  const r = live.recording;
-  if (r && r.state !== 'stopped') {
-    add(box, h('a', { class: 'pill rec', href: '#/record' }, h('span', { class: 'dot' }), r.state === 'paused' ? '녹화 일시정지' : '녹화 중'));
-  }
-  const run = live.run;
-  if (run && ['running', 'paused', 'waiting-user'].includes(run.status)) {
-    const p = run.progress;
-    add(box, h('a', { class: 'pill run', href: '#/run' }, h('span', { class: 'dot' }), `${STATUS[run.status][0]}${p ? ` ${p.rowsDone}/${p.rowsTotal}행` : ''}`));
-  }
-}
 
 // ---------- 라우터 ----------
 let cleanup = null;
+const AI_PAGE = { recipes: 'recipes', recipe: 'editor', run: 'run', report: 'report' };
 function route() {
   cleanup?.();
   cleanup = null;
@@ -139,9 +16,11 @@ function route() {
   const params = new URLSearchParams(query ?? '');
   const section = parts[0] || 'recipes';
   for (const a of document.querySelectorAll('#nav a')) a.classList.toggle('active', a.dataset.nav === (section === 'recipe' ? 'recipes' : section === 'report' ? 'reports' : section));
+  // AI 패널은 화면을 옮겨도 그대로 둔다. 편집·실행·리포트는 곧 그 화면의 레시피 대화로 바뀐다.
+  setAiScope({ page: AI_PAGE[section] ?? 'other', recipeId: section === 'recipe' ? parts[1] : undefined, fixed: ['recipe', 'run', 'report'].includes(section) });
   app.replaceChildren();
   window.scrollTo(0, 0);
-  const pages = { recipes: recipesPage, record: recordPage, recipe: () => editorPage(parts[1]), run: () => runPage(params), reports: reportsPage, report: () => reportPage(parts[1]), hub: () => hubPage(params), settings: settingsPage };
+  const pages = { recipes: recipesPage, record: recordPage, recipe: () => editorPage(app, parts[1], { openSetWizard, setLimitText, onCleanup: (fn) => (cleanup = fn), params }), run: () => runPage(params), reports: reportsPage, report: () => reportPage(parts[1]), hub: () => hubPage(params), settings: settingsPage };
   (pages[section] ?? recipesPage)();
 }
 window.addEventListener('hashchange', route);
@@ -239,7 +118,7 @@ function recordPage() {
   cleanup = onLive((type, d) => {
     if (type === 'recording' && d.state === 'stopped' && d.savedId) {
       toast('녹화를 저장했습니다.');
-      location.hash = `#/recipe/${d.savedId}`;
+      location.hash = `#/recipe/${d.savedId}?recorded=1`;
       return;
     }
     if (type === 'recording' || type === 'state') draw();
@@ -341,7 +220,7 @@ function recordingView(r) {
               e.target.disabled = true;
               e.target.textContent = '저장 중…';
               const { recipe } = await api('POST', '/api/record/stop');
-              location.hash = `#/recipe/${recipe.id}`;
+              location.hash = `#/recipe/${recipe.id}?recorded=1`;
             }),
           },
           '■ 녹화 종료하고 저장',
@@ -362,799 +241,84 @@ function recordingView(r) {
   );
 }
 
-// =====================================================================
-// 레시피 편집기
-// =====================================================================
-const ADDABLE = [
-  ['navigate', '주소 이동', () => ({ type: 'navigate', url: 'https://' })],
-  ['sleep', '잠시 대기', () => ({ type: 'sleep', ms: 2000 })],
-  ['waitText', '글자가 보일 때까지 대기', () => ({ type: 'wait', condition: { kind: 'textVisible', text: '' }, timeoutMs: 15000 })],
-  ['waitUrl', '주소가 바뀔 때까지 대기', () => ({ type: 'wait', condition: { kind: 'urlContains', value: '' }, timeoutMs: 15000 })],
-  ['pdf', 'PDF 저장', (r) => ({ type: 'pdf', fileName: `${r.name}_{{row}}.pdf` })],
-  ['screenshot', '화면 캡처', () => ({ type: 'screenshot', fileName: '화면_{{row}}.png', fullPage: true })],
-  ['pause', '사용자 확인 대기', () => ({ type: 'pause', message: '브라우저에서 확인 후 [계속]을 눌러 주세요.' })],
-  ['keypress', '키 입력', () => ({ type: 'keypress', key: 'Enter' })],
-  ['closeTab', '팝업 창 닫기', () => ({ type: 'closeTab' })],
-  ['assertText', '글자 확인(없으면 실패)', () => ({ type: 'assert', condition: { kind: 'textVisible', text: '' }, message: '' })],
-];
-
-async function editorPage(id) {
-  let data;
-  try {
-    data = await api('GET', `/api/recipes/${id}`);
-  } catch (e) {
-    add(app, h('div', { class: 'card notice bad' }, e.message));
-    return;
-  }
-  let recipe = data.recipe;
-  let problems = data.problems;
-  let dirty = false;
-  let openId = null;
-  let tab = 'steps';
-  const root = h('div');
-  add(app, root);
-
-  const markDirty = () => {
-    dirty = true;
-    saveBtn.disabled = false;
-    saveBtn.textContent = '저장 *';
-  };
-  const save = safely(async () => {
-    const r = await api('PUT', `/api/recipes/${recipe.id}`, recipe);
-    recipe = r.recipe;
-    problems = r.problems;
-    dirty = false;
-    toast(problems.length ? `저장했습니다. 고칠 점 ${problems.length}개가 있습니다.` : '저장했습니다.');
-    draw();
-  });
-  const saveBtn = h('button', { class: 'primary', onclick: save, disabled: true }, '저장');
-  window.onbeforeunload = () => (dirty ? '저장하지 않은 변경이 있습니다.' : undefined);
-  const ai = aiPanel({
-    getRecipe: () => recipe,
-    applyRecipe: (next) => {
-      recipe = { ...next, id: recipe.id };
-      markDirty();
-      draw();
-      toast('AI 제안을 적용했습니다. 확인 후 저장을 눌러 주세요.');
-    },
-  });
-  cleanup = () => {
-    window.onbeforeunload = null;
-    ai.destroy();
-  };
-  const allSteps = () => Object.values(recipe.blocks).flat();
-  const newId = () => {
-    const used = new Set(allSteps().map((s) => s.id));
-    let n = allSteps().length + 1;
-    while (used.has(`s${n}`)) n += 1;
-    return `s${n}`;
-  };
-
-  function draw() {
-    const nameIn = h('input', { type: 'text', value: recipe.name, oninput: (e) => ((recipe.name = e.target.value), markDirty()) });
-    const urlIn = h('input', { type: 'text', value: recipe.startUrl ?? '', oninput: (e) => ((recipe.startUrl = e.target.value), markDirty()) });
-    saveBtn.disabled = !dirty;
-    saveBtn.textContent = dirty ? '저장 *' : '저장';
-    mount(root, 
-      h(
-        'div',
-        { class: 'page-head' },
-        h('a', { href: '#/recipes', class: 'muted' }, '← 레시피'),
-        h('div', { class: 'spacer' }),
-        h('button', { class: 'ai-btn', onclick: () => ai.toggle() }, '✦ AI 도우미'),
-        h('button', { onclick: () => download(`${recipe.name}.json`, JSON.stringify(recipe, null, 2)) }, '내보내기'),
-        h(
-          'button',
-          {
-            onclick: async () => {
-              if (dirty) {
-                if (!confirm('저장하지 않은 변경이 있습니다. 저장한 뒤 세트로 내보낼까요?')) return;
-                await save();
-                if (dirty) return; // 저장 실패
-              }
-              openSetWizard(recipe.id);
-            },
-          },
-          '세트로 내보내기',
-        ),
-        h(
-          'button',
-          {
-            onclick: async () => {
-              if (dirty) {
-                if (!confirm('저장하지 않은 변경이 있습니다. 저장하고 실행 화면으로 갈까요?')) return;
-                await save();
-                if (dirty) return; // 저장 실패
-              }
-              location.hash = `#/run?recipe=${recipe.id}`;
-            },
-          },
-          '▶ 실행하기',
-        ),
-        saveBtn,
-      ),
-      h('div', { class: 'card grid2' }, h('label', { class: 'field' }, h('span', null, '레시피 이름'), nameIn), h('label', { class: 'field' }, h('span', null, '시작 주소'), urlIn)),
-      problems.length ? h('div', { class: 'notice warn' }, h('b', null, '실행 전에 고칠 점'), h('ul', null, problems.map((p) => h('li', null, p)))) : null,
-      recipe.origin ? h('div', { class: 'notice info small' }, setLimitText(recipe.origin), ' 제한은 JSON 탭의 origin 에 있습니다.') : null,
-      h(
-        'div',
-        { class: 'tabs' },
-        [
-          ['steps', `스텝 (${allSteps().length})`],
-          ['vars', `변수·엑셀 (${recipe.variables?.length ?? 0})`],
-          ['json', 'JSON'],
-        ].map(([k, label]) => h('button', { class: tab === k ? 'active' : '', onclick: () => ((tab = k), draw()) }, label)),
-      ),
-      tab === 'steps' ? stepsTab() : tab === 'vars' ? varsTab() : jsonTab(),
-    );
-  }
-
-  // ----- 스텝 탭 -----
-  function stepsTab() {
-    const blocks = Object.entries(recipe.blocks);
-    return h(
-      'div',
-      null,
-      blocks.map(([block, steps]) =>
-        h(
-          'div',
-          { style: 'margin-bottom:16px' },
-          blocks.length > 1 ? h('h3', null, block === (recipe.entryBlock ?? 'main') ? `${block} (시작 블록)` : `${block} 블록`) : null,
-          h('ul', { class: 'steps' }, steps.map((s, i) => stepItem(s, i, steps))),
-        ),
-      ),
-      addBar(),
-    );
-  }
-
-  function stepItem(s, i, steps) {
-    const open = openId === s.id;
-    return h(
-      'li',
-      { class: `step ${open ? 'open' : ''} ${s.disabled ? 'disabled' : ''}` },
-      h(
-        'div',
-        { class: 'step-head', onclick: () => ((openId = open ? null : s.id), draw()) },
-        h('span', { class: 'num' }, i + 1),
-        h('span', { class: `type t-${s.type}` }, STEP_LABELS[s.type] ?? s.type),
-        h('span', { class: 'desc' }, stepText(s)),
-        s.optional ? h('span', { class: 'badge' }, '없으면 건너뜀') : null,
-        s.onError === 'continue' ? h('span', { class: 'badge warn' }, '실패해도 계속') : null,
-        s.disabled ? h('span', { class: 'badge' }, '꺼짐') : null,
-      ),
-      open ? stepBody(s, i, steps) : null,
-    );
-  }
-
-  function field(label, input) {
-    return h('label', { class: 'field' }, h('span', null, label), input);
-  }
-  function text(obj, key, { type = 'text', placeholder, num = false } = {}) {
-    return h('input', {
-      type,
-      value: obj[key] ?? '',
-      placeholder,
-      oninput: (e) => {
-        obj[key] = num ? (e.target.value === '' ? undefined : Number(e.target.value)) : e.target.value;
-        markDirty();
-      },
-      onchange: () => draw(),
-    });
-  }
-
-  function stepBody(s, i, steps) {
-    const fields = [];
-    switch (s.type) {
-      case 'navigate':
-        fields.push(field('주소', text(s, 'url')));
-        break;
-      case 'input':
-        fields.push(field('입력값 ({{열이름}} 으로 엑셀 값)', text(s, 'value')));
-        break;
-      case 'select':
-        fields.push(field('선택값', text(s, 'value')), field('보이는 이름(선택)', text(s, 'label')));
-        break;
-      case 'check':
-        fields.push(field('상태', h('select', { onchange: (e) => ((s.checked = e.target.value === 'on'), markDirty(), draw()) }, h('option', { value: 'on', selected: s.checked !== false }, '체크'), h('option', { value: 'off', selected: s.checked === false }, '체크 해제'))));
-        break;
-      case 'keypress':
-        fields.push(field('키 (예: Enter, Escape, Tab, Control+A)', text(s, 'key')));
-        break;
-      case 'sleep':
-        fields.push(field('대기 시간(ms)', text(s, 'ms', { type: 'number', num: true })));
-        break;
-      case 'wait':
-      case 'assert': {
-        const c = s.condition ?? (s.condition = { kind: 'textVisible', text: '' });
-        fields.push(
-          field(
-            '조건',
-            h(
-              'select',
-              {
-                onchange: (e) => {
-                  s.condition = e.target.value === 'urlContains' ? { kind: 'urlContains', value: '' } : e.target.value === 'exists' && c.target ? { kind: 'exists', target: c.target } : { kind: 'textVisible', text: '' };
-                  markDirty();
-                  draw();
-                },
-              },
-              h('option', { value: 'textVisible', selected: c.kind === 'textVisible' }, '화면에 글자가 보임'),
-              h('option', { value: 'urlContains', selected: c.kind === 'urlContains' }, '주소에 글자가 포함됨'),
-              c.target ? h('option', { value: 'exists', selected: c.kind === 'exists' }, '요소가 있음') : null,
-            ),
-          ),
-        );
-        if (c.kind === 'textVisible') fields.push(field('글자', text(c, 'text')));
-        if (c.kind === 'urlContains') fields.push(field('주소에 포함될 글자', text(c, 'value')));
-        if (s.type === 'assert') fields.push(field('실패 메시지', text(s, 'message')));
-        break;
-      }
-      case 'extract':
-        fields.push(field('저장할 변수 이름 (결과 엑셀 열 이름)', text(s, 'saveAs')), field('속성(비우면 글자)', text(s, 'attr', { placeholder: '예: href, value' })));
-        break;
-      case 'dialog':
-        fields.push(
-          field('응답', h('select', { onchange: (e) => ((s.action = e.target.value), markDirty(), draw()) }, h('option', { value: 'accept', selected: s.action !== 'dismiss' }, '확인'), h('option', { value: 'dismiss', selected: s.action === 'dismiss' }, '취소'))),
-        );
-        if (s.meta?.dialogType === 'prompt') fields.push(field('입력할 글자', text(s, 'promptText')));
-        break;
-      case 'pdf':
-        fields.push(field('파일 이름 ({{열}}, {{row}}, {{sys:date:YYYYMMDD}})', text(s, 'fileName')), field('용지 방향', h('select', { onchange: (e) => ((s.landscape = e.target.value === 'l'), markDirty()) }, h('option', { value: 'p', selected: !s.landscape }, '세로'), h('option', { value: 'l', selected: !!s.landscape }, '가로'))));
-        break;
-      case 'screenshot':
-        fields.push(field('파일 이름', text(s, 'fileName')));
-        break;
-      case 'download':
-        fields.push(field('저장 이름 ({{열}}, {{row}} 사용 가능 · 비우면 원래 이름 · 확장자는 원래 것 유지)', text(s, 'fileName', { placeholder: s.meta?.suggestedFilename ?? '' })));
-        break;
-      case 'upload':
-        fields.push(field('첨부할 파일 경로 (예: C:\\자료\\{{상호}}.pdf)', text(s, 'path')));
-        break;
-      case 'pause':
-        fields.push(field('안내 문구', text(s, 'message')));
-        break;
-      default:
-        break;
-    }
-    if (s.target || ['wait', 'assert'].includes(s.type)) fields.push(field('최대 대기(ms, 기본 10000)', text(s, 'timeoutMs', { type: 'number', num: true })));
-    if (!['pdf', 'download', 'upload', 'branch', 'pause', 'dialog'].includes(s.type)) fields.push(field('시도 횟수(기본 1)', text(s, 'attempts', { type: 'number', num: true })));
-
-    const toggle = (key, label, on = true, off = undefined) =>
-      h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: s[key] === on, onchange: (e) => ((s[key] = e.target.checked ? on : off), markDirty(), draw()) }), label);
-
-    const move = (d) => () => {
-      const j = i + d;
-      if (j < 0 || j >= steps.length) return;
-      [steps[i], steps[j]] = [steps[j], steps[i]];
-      markDirty();
-      draw();
-    };
-    const insertAfter = (step) => {
-      steps.splice(i + 1, 0, { id: newId(), ...step });
-      openId = steps[i + 1].id;
-      markDirty();
-      draw();
-    };
-    const actions = [
-      h('button', { class: 'sm', onclick: move(-1), disabled: i === 0 }, '↑ 위로'),
-      h('button', { class: 'sm', onclick: move(1), disabled: i === steps.length - 1 }, '↓ 아래로'),
-      h('button', { class: 'sm', onclick: () => insertAfter(structuredClone({ ...s, id: undefined })) }, '복제'),
-    ];
-    if ((s.type === 'input' || s.type === 'select') && !String(s.value ?? '').includes('{{')) {
-      actions.push(
-        h(
-          'button',
-          {
-            class: 'sm',
-            onclick: () => {
-              const suggestion = s.target?.meta?.label || s.target?.meta?.name || '';
-              const col = prompt('연결할 엑셀 열 이름을 입력하세요. 실행할 때 엑셀의 이 열 값이 들어갑니다.', suggestion);
-              if (!col?.trim()) return;
-              s.meta = { ...(s.meta ?? {}), recordedValue: s.label || s.value }; // AI 화면 관찰 때 견본 값으로 쓴다
-              s.value = `{{${col.trim()}}}`;
-              delete s.label;
-              recipe.variables ??= [];
-              if (!recipe.variables.some((v) => v.id === col.trim() || v.name === col.trim())) recipe.variables.push({ id: col.trim(), name: col.trim(), source: { kind: 'excel', column: col.trim() } });
-              markDirty();
-              draw();
-            },
-          },
-          '엑셀 열로 바꾸기',
-        ),
-      );
-    }
-    if (s.type === 'click' && s.target) {
-      actions.push(h('button', { class: 'sm', onclick: () => ((s.type = 'download'), (s.fileName = ''), markDirty(), draw()) }, '파일 다운로드로 바꾸기'));
-    }
-    if (s.type === 'download') {
-      actions.push(h('button', { class: 'sm', onclick: () => ((s.type = 'click'), delete s.fileName, markDirty(), draw()) }, '일반 클릭으로 되돌리기'));
-    }
-    if (s.target) {
-      actions.push(
-        h(
-          'button',
-          {
-            class: 'sm',
-            onclick: () => {
-              const name = prompt('읽은 값을 저장할 이름 (결과 엑셀의 열 이름이 됩니다)', s.target.meta?.label || s.target.meta?.text?.slice(0, 20) || '값');
-              if (!name?.trim()) return;
-              insertAfter({ type: 'extract', target: structuredClone(s.target), saveAs: name.trim() });
-            },
-          },
-          '이 요소의 글자 읽기 추가',
-        ),
-        h('button', { class: 'sm', onclick: () => insertAfter({ type: 'wait', condition: { kind: 'exists', target: structuredClone(s.target) }, timeoutMs: 15000 }) }, '이 요소가 나올 때까지 대기 추가'),
-      );
-    }
-    actions.push(
-      h(
-        'button',
-        {
-          class: 'sm danger',
-          onclick: () => {
-            steps.splice(i, 1);
-            openId = null;
-            markDirty();
-            draw();
-          },
-        },
-        '삭제',
-      ),
-    );
-
-    return h(
-      'div',
-      { class: 'step-body' },
-      fields.length ? h('div', { class: 'fields' }, fields) : null,
-      h('div', { class: 'row' }, s.target || ['wait'].includes(s.type) ? toggle('optional', '없으면 건너뜀 (2초만 찾음)') : null, toggle('onError', '실패해도 다음 스텝 계속', 'continue'), toggle('disabled', '이 스텝 끄기')),
-      h('div', { class: 'actions' }, actions),
-      s.target
-        ? h(
-            'details',
-            { class: 'cands' },
-            h('summary', { class: 'muted' }, `대상 요소: ${targetText(s.target)} · 후보 ${s.target.candidates.length}개${s.target.framePath?.length ? ` · 프레임 ${s.target.framePath.length}단계` : ''}`),
-            h('ol', null, s.target.candidates.map((c) => h('li', null, h('span', { class: 'badge' }, c.score), ' ', h('code', null, c.kind), ' ', c.kind === 'text' ? `<${c.value.tag}> "${c.value.text}"` : c.value))),
-            h('div', { class: 'muted' }, '실행할 때 점수가 높은 후보부터 시도해, 화면에서 정확히 하나만 맞는 후보를 씁니다.'),
-          )
-        : null,
-      s.meta?.url ? h('div', { class: 'muted small', style: 'margin-top:6px;overflow-wrap:anywhere' }, `녹화 당시 주소: ${s.meta.url}`) : null,
-    );
-  }
-
-  function addBar() {
-    const sel = h('select', { style: 'width:auto' }, ADDABLE.map(([k, label]) => h('option', { value: k }, label)));
-    return h(
-      'div',
-      { class: 'card flat row' },
-      h('b', null, '스텝 추가'),
-      sel,
-      h(
-        'button',
-        {
-          onclick: () => {
-            const make = ADDABLE.find(([k]) => k === sel.value)[2];
-            const main = recipe.blocks[recipe.entryBlock ?? 'main'];
-            let at = main.length;
-            const openIdx = main.findIndex((s) => s.id === openId);
-            if (openIdx >= 0) at = openIdx + 1;
-            const step = { id: newId(), ...make(recipe) };
-            main.splice(at, 0, step);
-            openId = step.id;
-            markDirty();
-            draw();
-          },
-        },
-        '＋ 추가',
-      ),
-      h('span', { class: 'muted small' }, '펼쳐 둔 스텝 바로 뒤(없으면 맨 끝)에 들어갑니다.'),
-    );
-  }
-
-  // ----- 변수 탭 -----
-  function varsTab() {
-    recipe.variables ??= [];
-    const KIND = { excel: '엑셀 열', static: '고정값', prompt: '실행할 때 입력' };
-    const rows = recipe.variables.map((v, i) => {
-      const src = v.source ?? (v.source = { kind: 'static', value: '' });
-      const detail =
-        src.kind === 'excel'
-          ? field('엑셀 열 이름', text(src, 'column'))
-          : src.kind === 'static'
-            ? field('값', text(src, 'value'))
-            : h('div', { class: 'row' }, field('기본값', text(src, 'default')), h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: !!src.secret, onchange: (e) => ((src.secret = e.target.checked), markDirty()) }), '비밀값(화면에 가림)'));
-      return h(
-        'tr',
-        null,
-        h('td', null, h('code', null, `{{${v.id}}}`)),
-        h('td', null, text(v, 'name')),
-        h(
-          'td',
-          null,
-          h(
-            'select',
-            {
-              onchange: (e) => {
-                v.source = e.target.value === 'excel' ? { kind: 'excel', column: v.name || v.id } : e.target.value === 'prompt' ? { kind: 'prompt' } : { kind: 'static', value: '' };
-                markDirty();
-                draw();
-              },
-            },
-            Object.entries(KIND).map(([k, label]) => h('option', { value: k, selected: src.kind === k }, label)),
-          ),
-        ),
-        h('td', null, detail),
-        h('td', null, h('button', { class: 'sm danger', onclick: () => (recipe.variables.splice(i, 1), markDirty(), draw()) }, '삭제')),
-      );
-    });
-    const linkInput = h('input', {
-      type: 'file',
-      accept: '.xlsx,.csv',
-      style: 'display:none',
-      onchange: safely(async (e) => {
-        const f = e.target.files[0];
-        if (!f) return;
-        if (dirty) await save();
-        const up = await uploadFile(f);
-        const { recipe: linked, linked: links } = await api('POST', `/api/recipes/${recipe.id}/autolink`, { uploadId: up.id });
-        if (!links.length) return toast('첫 행 값과 똑같은 입력값을 찾지 못했습니다. 스텝에서 "엑셀 열로 바꾸기"를 써 주세요.');
-        recipe = linked;
-        markDirty();
-        toast(`${links.length}개 입력을 엑셀 열에 연결했습니다: ${links.map((l) => l.column).join(', ')} — 저장을 눌러 주세요.`);
-        draw();
-      }),
-    });
-    return h(
-      'div',
-      null,
-      h(
-        'div',
-        { class: 'card' },
-        h('h2', null, '엑셀 연결'),
-        h('p', { class: 'muted small', style: 'margin-top:0' }, '녹화할 때 첫 거래처 값으로 입력해 두었다면, 그 값이 들어 있는 엑셀을 올리면 같은 값의 입력 스텝을 자동으로 {{열 이름}} 으로 바꿉니다 (한 열에서만 일치할 때).'),
-        h('div', { class: 'row' }, linkInput, h('button', { onclick: () => linkInput.click() }, '엑셀 첫 행으로 자동 연결'), h('a', { class: 'btn', href: `/api/recipes/${recipe.id}/template` }, '입력 양식 받기')),
-      ),
-      h(
-        'div',
-        { class: 'card' },
-        h('div', { class: 'row', style: 'margin-bottom:10px' }, h('h2', { style: 'margin:0' }, '변수'), h('div', { style: 'flex:1' }), h('button', { class: 'sm', onclick: () => (recipe.variables.push({ id: `var${recipe.variables.length + 1}`, name: '', source: { kind: 'static', value: '' } }), markDirty(), draw()) }, '＋ 변수 추가')),
-        recipe.variables.length
-          ? h('div', { class: 'table-wrap' }, h('table', null, h('thead', null, h('tr', null, h('th', null, '쓰는 법'), h('th', null, '이름'), h('th', null, '종류'), h('th', null, '설정'), h('th', null, ''))), h('tbody', null, rows)))
-          : h('p', { class: 'muted' }, '변수가 없습니다.'),
-        h(
-          'p',
-          { class: 'muted small' },
-          '그 밖에 쓸 수 있는 값: ',
-          h('code', null, '{{row}}'),
-          ' 행 번호, ',
-          h('code', null, '{{sys:date:YYYYMMDD}}'),
-          ' 오늘 날짜, ',
-          h('code', null, '{{sys:month:-1}}'),
-          ' 지난달, ',
-          h('code', null, '{{sys:quarter}}'),
-          ' 분기, ',
-          h('code', null, '{{값이름|digits}}'),
-          ' 숫자만.',
-        ),
-      ),
-    );
-  }
-
-  // ----- JSON 탭 -----
-  function jsonTab() {
-    const ta = h('textarea', { class: 'json', spellcheck: 'false' });
-    ta.value = JSON.stringify(recipe, null, 2);
-    return h(
-      'div',
-      { class: 'card stack' },
-      h('p', { class: 'muted small', style: 'margin:0' }, '조건 분기(branch)·추가 블록 같은 고급 편집은 여기서 직접 고칠 수 있습니다.'),
-      ta,
-      h(
-        'div',
-        null,
-        h(
-          'button',
-          {
-            class: 'primary',
-            onclick: () => {
-              try {
-                const parsed = JSON.parse(ta.value);
-                if (!parsed.blocks) throw new Error('blocks 가 없습니다.');
-                parsed.id = recipe.id;
-                recipe = parsed;
-                markDirty();
-                toast('적용했습니다. 저장을 눌러 주세요.');
-                draw();
-              } catch (e) {
-                toast(`JSON 오류: ${e.message}`, 'error');
-              }
-            },
-          },
-          'JSON 적용',
-        ),
-      ),
-    );
-  }
-
-  draw();
-}
-
-// =====================================================================
-// AI 도우미 패널 (편집기 오른쪽)
-// =====================================================================
-const AI_EXAMPLES = [
-  '입력값들을 엑셀 열로 바꿔 줘',
-  '조회 결과 화면에서 금액을 읽어서 결과 엑셀에 남겨 줘',
-  '조회 결과가 없다는 알림이 뜨면 그 행은 실패로 표시하고 넘어가게 해 줘',
-  '행마다 결과 화면을 {{상호}}_날짜.pdf 로 저장해 줘',
-  '이 레시피가 하는 일을 순서대로 설명해 줘',
-];
-
-function aiPanel({ getRecipe, applyRecipe }) {
-  const sessionId = `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-  let sid = sessionId;
-  let open = false;
-  let busyNow = false;
-  let pending = null; // { recipe, changes, usage }
-  let previousApplied = true;
-  let settingsView = null;
-  const thread = h('div', { class: 'ai-thread' });
-  const progressBox = h('div', { class: 'ai-progress' });
-  const input = h('textarea', { placeholder: '레시피를 어떻게 고칠지 말해 주세요. (Ctrl+Enter 로 보내기)', rows: 3 });
-  const risky = h('input', { type: 'checkbox' });
-  const sendBtn = h('button', { class: 'primary', onclick: () => send() }, '보내기');
-  const settingsBox = h('div', { class: 'ai-settings' });
-  const modelLabel = h('span', { class: 'muted small' });
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) send();
-  });
-
-  const panel = h(
-    'aside',
-    { class: 'ai-panel', hidden: true },
-    h(
-      'div',
-      { class: 'ai-head' },
-      h('b', null, '✦ AI 도우미'),
-      modelLabel,
-      h('div', { style: 'flex:1' }),
-      h('button', { class: 'ghost sm', onclick: () => ((settingsBox.hidden = !settingsBox.hidden), drawSettings()) }, '설정'),
-      h('button', { class: 'ghost sm', onclick: resetChat }, '새 대화'),
-      h('button', { class: 'ghost icon', title: '닫기', onclick: () => toggle(false) }, '✕'),
-    ),
-    settingsBox,
-    thread,
-    progressBox,
-    h(
-      'div',
-      { class: 'ai-input' },
-      input,
-      h('div', { class: 'row' }, h('label', { class: 'check small' }, risky, '화면 관찰 때 제출·결제 같은 버튼도 누르기 허용'), h('div', { style: 'flex:1' }), sendBtn),
-    ),
-  );
-  document.body.append(panel);
-  settingsBox.hidden = true;
-
-  async function loadSettings() {
-    settingsView = (await api('GET', '/api/settings').catch(() => null))?.openrouter ?? null;
-    const m = settingsView?.models?.find((x) => x.id === settingsView?.model);
-    modelLabel.textContent = settingsView ? (m ? m.label.split(' (')[0] : settingsView.model) : '';
-    if (settingsView && !settingsView.hasKey) settingsBox.hidden = false;
-    drawSettings();
-  }
-
-  function drawSettings() {
-    if (!settingsView) return mount(settingsBox);
-    const key = h('input', { type: 'password', placeholder: settingsView.hasKey ? `저장된 키 ${settingsView.keyHint} — 바꿀 때만 입력` : 'sk-or-v1-…', autocomplete: 'off' });
-    const model = h(
-      'select',
-      null,
-      settingsView.models.map((m) => h('option', { value: m.id, selected: m.id === settingsView.model }, m.label)),
-      settingsView.models.some((m) => m.id === settingsView.model) ? null : h('option', { value: settingsView.model, selected: true }, settingsView.model),
-    );
-    const custom = h('input', { type: 'text', placeholder: '다른 OpenRouter 모델 id (선택)' });
-    mount(
-      settingsBox,
-      h('div', { class: 'small muted' }, 'OpenRouter 키는 이 PC 의 workspace\\settings.json 에만 저장되고 화면에 다시 보이지 않습니다. 키는 openrouter.ai/keys 에서 만들 수 있습니다.'),
-      settingsView.fromEnv ? h('div', { class: 'small' }, '지금은 환경 변수 OPENROUTER_API_KEY 의 키를 쓰고 있습니다.') : null,
-      h('label', { class: 'field' }, h('span', null, 'API 키'), key),
-      h('label', { class: 'field' }, h('span', null, '모델'), model),
-      h('label', { class: 'field' }, h('span', null, '직접 입력 (비우면 위 선택)'), custom),
-      h(
-        'div',
-        { class: 'row' },
-        h(
-          'button',
-          {
-            class: 'primary sm',
-            onclick: safely(async () => {
-              const body = { openrouter: { model: custom.value.trim() || model.value } };
-              if (key.value.trim()) body.openrouter.apiKey = key.value.trim();
-              await api('PUT', '/api/settings', body);
-              toast('AI 설정을 저장했습니다.');
-              settingsBox.hidden = true;
-              await loadSettings();
-            }),
-          },
-          '저장',
-        ),
-        settingsView.hasKey && !settingsView.fromEnv
-          ? h(
-              'button',
-              {
-                class: 'sm danger',
-                onclick: safely(async () => {
-                  if (!confirm('저장된 OpenRouter 키를 지울까요?')) return;
-                  await api('PUT', '/api/settings', { openrouter: { apiKey: '' } });
-                  await loadSettings();
-                }),
-              },
-              '키 지우기',
-            )
-          : null,
-      ),
-    );
-  }
-
-  function bubble(role, ...content) {
-    const el = h('div', { class: `ai-msg ${role}` }, ...content);
-    add(thread, el);
-    thread.scrollTop = thread.scrollHeight;
-    return el;
-  }
-
-  function drawEmpty() {
-    if (thread.childElementCount) return;
-    add(
-      thread,
-      h(
-        'div',
-        { class: 'ai-empty' },
-        h('p', { class: 'small muted' }, '녹화한 레시피를 대화로 다듬습니다. AI 는 레시피를 읽고 고치며, 필요하면 숨긴 브라우저로 특정 스텝까지 실제로 실행해 화면을 확인합니다. 바꾼 내용은 [적용]을 눌러야 반영됩니다.'),
-        AI_EXAMPLES.map((ex) => h('button', { class: 'chip', onclick: () => ((input.value = ex), input.focus()) }, ex)),
-      ),
-    );
-  }
-
-  function resetChat() {
-    api('POST', '/api/agent/reset', { sessionId: sid }).catch(() => {});
-    sid = `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    pending = null;
-    previousApplied = true;
-    mount(thread);
-    mount(progressBox);
-    drawEmpty();
-  }
-
-  function changeCard(result) {
-    const card = h(
-      'div',
-      { class: 'ai-changes' },
-      h('b', null, `제안된 변경 ${result.changes.length}건`),
-      h('ol', null, result.changes.map((c) => h('li', null, c))),
-      result.problems?.length ? h('div', { class: 'notice warn small' }, `검사에서 고칠 점 ${result.problems.length}개: ${result.problems.join(' / ')}`) : null,
-    );
-    const actions = h(
-      'div',
-      { class: 'row' },
-      h(
-        'button',
-        {
-          class: 'primary sm',
-          onclick: () => {
-            applyRecipe(pending.recipe);
-            pending = null;
-            previousApplied = true;
-            mount(actions, h('span', { class: 'badge ok' }, '적용함'));
-          },
-        },
-        '적용',
-      ),
-      h(
-        'button',
-        {
-          class: 'sm',
-          onclick: () => {
-            pending = null;
-            previousApplied = false;
-            mount(actions, h('span', { class: 'badge' }, '버림'));
-          },
-        },
-        '버리기',
-      ),
-    );
-    add(card, actions);
-    return card;
-  }
-
-  async function send() {
-    const text = input.value.trim();
-    if (!text || busyNow) return;
-    if (!settingsView?.hasKey) {
-      settingsBox.hidden = false;
-      drawSettings();
-      return toast('먼저 OpenRouter 키를 넣어 주세요.', 'error');
-    }
-    busyNow = true;
-    sendBtn.disabled = true;
-    sendBtn.textContent = '작업 중…';
-    input.value = '';
-    thread.querySelector('.ai-empty')?.remove();
-    bubble('user', text);
-    mount(progressBox, h('div', { class: 'muted small' }, 'AI 에 보내는 중…'));
-    // 아직 적용/버리기를 안 한 제안이 있으면 그 위에 이어서 고친다.
-    const base = pending ? pending.recipe : getRecipe();
-    const prevChanges = pending ? pending.changes : [];
-    try {
-      const r = await api('POST', '/api/agent/turn', { sessionId: sid, recipe: base, message: text, allowRisky: risky.checked, previousApplied });
-      previousApplied = true;
-      const cost = r.usage?.turn?.cost ? ` · 이번 요청 $${r.usage.turn.cost.toFixed(4)}` : '';
-      const msg = bubble('assistant', h('div', { class: 'ai-text' }, r.reply || '(답변 없음)'), h('div', { class: 'muted small' }, `${r.usage?.model ?? ''}${cost}`));
-      if (r.changes.length || prevChanges.length) {
-        thread.querySelectorAll('.ai-changes .row').forEach((row) => row.querySelector('button') && mount(row, h('span', { class: 'badge' }, '다음 제안에 합쳐짐')));
-        pending = { recipe: r.recipe, changes: [...prevChanges, ...r.changes] };
-        add(msg, changeCard({ ...r, changes: pending.changes }));
-      }
-    } catch (e) {
-      bubble('error', e.message);
-    } finally {
-      busyNow = false;
-      sendBtn.disabled = false;
-      sendBtn.textContent = '보내기';
-      mount(progressBox);
-      thread.scrollTop = thread.scrollHeight;
-    }
-  }
-
-  const off = onLive((type, d) => {
-    if (type !== 'agent-progress' || d.sessionId !== sid || !busyNow) return;
-    add(progressBox, h('div', { class: 'small' }, d.text));
-    while (progressBox.childElementCount > 40) progressBox.firstElementChild.remove();
-    progressBox.scrollTop = progressBox.scrollHeight;
-  });
-
-  function toggle(force) {
-    open = force ?? !open;
-    panel.hidden = !open;
-    document.body.classList.toggle('ai-open', open);
-    if (open) {
-      loadSettings();
-      drawEmpty();
-      input.focus();
-    }
-  }
-
-  return {
-    toggle,
-    destroy() {
-      off();
-      panel.remove();
-      document.body.classList.remove('ai-open');
-      if (!pending) api('POST', '/api/agent/reset', { sessionId: sid }).catch(() => {});
-    },
-  };
-}
+// 레시피 편집기는 public/editor.js (스텝 트리·조건·변수·입력값 정리는 editor-*.js)
 
 // =====================================================================
 // 실행
 // =====================================================================
 async function runPage(params) {
-  const recipes = await api('GET', '/api/recipes').catch(() => []);
-  const head = h('div', { class: 'page-head' }, h('h1', null, '실행'));
+  const [recipes, settingsView] = await Promise.all([api('GET', '/api/recipes').catch(() => []), api('GET', '/api/settings').catch(() => null)]);
+  const secretsAvailable = settingsView?.secrets?.available !== false; // Windows 가 아니면 "이 PC 에 저장" 을 숨긴다
+  // 편집기와 같은 이름의 AI 단추 (편집기에서 익힌 사용자가 같은 자리에서 찾는다)
+  const head = h('div', { class: 'page-head' }, h('h1', null, '실행'), h('div', { class: 'spacer' }), h('button', { class: 'ai-btn', onclick: () => toggleAi() }, '✦ AI 도우미'));
   const livePanel = h('div');
   const setup = h('div');
   add(app, head, livePanel, setup);
 
-  let selected = params.get('recipe') || localStorage.getItem('rpa:lastRecipe') || recipes[0]?.id;
+  // 기본 레시피: 주소에 준 것 → 지금 편집·AI 대화 중인 것 → 마지막에 실행한 것 → 첫 레시피 (지워진 것은 건너뛴다)
+  const exists = (id) => !!id && recipes.some((r) => r.id === id);
+  const lastRun = (() => {
+    try {
+      return localStorage.getItem('rpa:lastRecipe');
+    } catch {
+      return null;
+    }
+  })();
+  let selected = [params.get('recipe'), getAiRecipe(), lastRun].find(exists) ?? params.get('recipe') ?? recipes[0]?.id;
+  if (selected && recipes.length && !exists(selected)) selected = recipes[0].id; // 지워진 레시피
   const presetUpload = params.get('recipe') && params.get('upload'); // 세트 [예시로 실행]: 설치한 예시 입력을 골라 둔다
   let detail = null;
   let upload = null;
   const values = {};
+  let secretInfo = new Map(); // 비밀 변수 id → { saved, savedAt } (이 PC 에 저장한 값)
+  const changing = new Set(); // [바꾸기] 를 누른 비밀 변수
+  const saveFlag = {}; // 비밀 변수 id → [이 PC 에 저장] 체크
+  /** 실행 화면에서 레시피를 바꾼다 (고르기 상자·AI 패널의 [돌아가기] 공통) */
+  const pick = (id) => {
+    if (!exists(id)) return;
+    selected = id;
+    upload = null;
+    changing.clear();
+    aiScope();
+    aiUpload();
+    try {
+      localStorage.setItem('rpa:lastRecipe', selected);
+    } catch {
+      /* 무시 */
+    }
+    loadDetail();
+  };
+  const aiScope = () => selected && recipes.some((r) => r.id === selected) && setAiRecipe(selected, { name: recipes.find((r) => r.id === selected)?.name, onSaved: () => loadDetail(), onReturn: pick, notice: true });
+  const aiUpload = () => setAiContext({ upload: upload ? { headers: upload.headers, firstRow: upload.sample?.[0] ?? {} } : undefined, uploadId: upload?.id });
+  aiScope();
   const opts = { headless: false, humanPacing: false, recordVideo: false, startRow: '', maxRows: '', onRowError: 'skip' };
 
+  let watched = null; // 이 화면에서 진행 중인 것을 본 실행 (끝나도 펼쳐 둔다)
+  let opened = null; // [기록 펼치기] 를 누른 실행
   function drawLive() {
     const run = live.run;
     if (!run) return mount(livePanel);
     const active = ['running', 'paused', 'waiting-user'].includes(run.status);
+    if (active) watched = run.runId;
+    // 끝난 지난 실행(이 화면에 오기 전에 끝났거나 다른 레시피의 것)은 한 줄로 접어 설정이 첫 화면에 보이게 한다
+    if (!active && watched !== run.runId && opened !== run.runId) {
+      const p = run.progress ?? {};
+      const other = run.recipeId && selected && run.recipeId !== selected;
+      return mount(
+        livePanel,
+        h(
+          'div',
+          { class: 'card flat row last-run' },
+          h('span', { class: 'muted small' }, other ? '다른 레시피의 지난 실행:' : '지난 실행:'),
+          h('b', null, run.recipeName ?? ''),
+          statusBadge(run.status),
+          p.rowsTotal ? h('span', { class: 'muted small' }, `${p.rowsTotal}행 중 성공 ${(p.rowsDone ?? 0) - (p.rowsFailed ?? 0)} · 실패 ${p.rowsFailed ?? 0}`) : null,
+          h('div', { style: 'flex:1' }),
+          h('a', { class: 'btn sm', href: `#/report/${run.runId}` }, '리포트 보기'),
+          h('button', { class: 'sm ghost', onclick: () => ((opened = run.runId), drawLive()) }, '기록 펼치기'),
+        ),
+      );
+    }
     const p = run.progress ?? { rowsDone: 0, rowsTotal: 0 };
     const pct = p.rowsTotal ? Math.round((p.rowsDone / p.rowsTotal) * 100) : 0;
     const logBox = h(
@@ -1200,7 +364,56 @@ async function runPage(params) {
 
   async function loadDetail() {
     detail = selected ? await api('GET', `/api/recipes/${selected}`).catch(() => null) : null;
+    await loadSecrets();
     drawSetup();
+  }
+  async function loadSecrets() {
+    const has = detail?.prompts?.some((v) => v.source?.secret);
+    const list = has ? await api('GET', `/api/recipes/${selected}/secrets`).catch(() => []) : [];
+    secretInfo = new Map(list.map((x) => [x.varId, x]));
+  }
+  const isSaved = (v) => !!(v.source?.secret && secretInfo.get(v.id)?.saved);
+
+  /** 비밀값 칸: 저장돼 있으면 ●●●● 저장됨 · 바꾸기 · 지우기, 아니면 입력 칸 + [이 PC 에 저장] */
+  function secretField(v) {
+    const label = v.name || v.id;
+    const info = secretInfo.get(v.id);
+    if (info?.saved && !changing.has(v.id)) {
+      const forget = safely(async () => {
+        if (!confirm(`이 PC 에 저장한 "${label}" 값을 지울까요? 다음 실행부터 다시 입력해야 합니다.`)) return;
+        await api('DELETE', `/api/recipes/${selected}/secrets/${encodeURIComponent(v.id)}`);
+        delete values[v.id];
+        await loadSecrets();
+        toast(`저장한 "${label}" 값을 지웠습니다.`);
+        drawSetup();
+      });
+      return h(
+        'div',
+        { class: 'secret-field' },
+        h('span', { class: 'secret-label' }, label),
+        h(
+          'div',
+          { class: 'row secret-saved-row' },
+          h('span', { class: 'secret-saved' }, '●●●● 저장됨'),
+          ' · ',
+          h('button', { class: 'link', onclick: () => (changing.add(v.id), (saveFlag[v.id] = true), drawSetup()) }, '바꾸기'),
+          ' · ',
+          h('button', { class: 'link danger', onclick: forget }, '지우기'),
+        ),
+        h('div', { class: 'muted small' }, `${info.savedAt ? `${fmtTime(info.savedAt)} 에 ` : ''}이 PC 에 저장한 값으로 실행합니다.`),
+      );
+    }
+    return h(
+      'div',
+      { class: 'secret-field' },
+      field2(label, h('input', { type: 'password', value: values[v.id] ?? '', autocomplete: 'new-password', oninput: (e) => (values[v.id] = e.target.value) })),
+      h(
+        'div',
+        { class: 'row' },
+        secretsAvailable ? h('label', { class: 'check small' }, h('input', { type: 'checkbox', checked: !!saveFlag[v.id], onchange: (e) => (saveFlag[v.id] = e.target.checked) }), '이 PC 에 저장 (다음부터 묻지 않음)') : null,
+        changing.has(v.id) ? h('button', { class: 'link', onclick: () => (changing.delete(v.id), delete values[v.id], (saveFlag[v.id] = false), drawSetup()) }, '취소 (저장된 값 쓰기)') : null,
+      ),
+    );
   }
 
   function drawSetup() {
@@ -1212,18 +425,7 @@ async function runPage(params) {
     }
     const recipeSel = h(
       'select',
-      {
-        onchange: (e) => {
-          selected = e.target.value;
-          upload = null;
-          try {
-            localStorage.setItem('rpa:lastRecipe', selected);
-          } catch {
-            /* 무시 */
-          }
-          loadDetail();
-        },
-      },
+      { 'aria-label': '실행할 레시피', onchange: (e) => pick(e.target.value) },
       recipes.map((r) => h('option', { value: r.id, selected: r.id === selected }, r.name)),
     );
     const cols = detail?.excelColumns ?? [];
@@ -1236,6 +438,7 @@ async function runPage(params) {
         const f = e.target.files[0];
         if (!f) return;
         upload = await uploadFile(f);
+        aiUpload();
         drawSetup();
       }),
     });
@@ -1303,17 +506,27 @@ async function runPage(params) {
             { class: 'card stack' },
             h('h2', null, '3. 실행할 때 넣을 값'),
             prompts.map((v) =>
-              field2(
-                v.name || v.id,
-                h('input', {
-                  type: v.source.secret ? 'password' : 'text',
-                  value: values[v.id] ?? v.source.default ?? '',
-                  autocomplete: 'off',
-                  oninput: (e) => (values[v.id] = e.target.value),
-                }),
-              ),
+              v.source.secret
+                ? secretField(v)
+                : field2(
+                    v.name || v.id,
+                    h('input', {
+                      type: 'text',
+                      value: values[v.id] ?? v.source.default ?? '',
+                      autocomplete: 'off',
+                      oninput: (e) => (values[v.id] = e.target.value),
+                    }),
+                  ),
             ),
-            h('p', { class: 'muted small', style: 'margin:0' }, '비밀값은 저장하지 않고 이번 실행에만 씁니다.'),
+            prompts.some((v) => v.source.secret)
+              ? h(
+                  'p',
+                  { class: 'muted small', style: 'margin:0' },
+                  secretsAvailable
+                    ? '비밀값은 [이 PC 에 저장] 을 켠 것만 이 Windows 계정으로 암호화해 이 PC 에 남깁니다. 다른 PC·계정에서는 다시 입력해야 합니다. 켜지 않으면 이번 실행에만 씁니다.'
+                    : '비밀값을 이 PC 에 저장하는 기능은 Windows 에서만 쓸 수 있습니다. 비밀값은 저장하지 않고 이번 실행에만 씁니다.',
+                )
+              : null,
           )
         : null,
       h(
@@ -1340,10 +553,22 @@ async function runPage(params) {
               class: 'primary',
               disabled: !canStart,
               onclick: safely(async () => {
-                const missingPrompt = prompts.filter((v) => !(values[v.id] ?? v.source.default));
+                const missingPrompt = prompts.filter((v) => !(values[v.id] ?? v.source.default) && !isSaved(v));
                 if (missingPrompt.length) throw new Error(`값을 넣어 주세요: ${missingPrompt.map((v) => v.name || v.id).join(', ')}`);
+                // 저장된 비밀값은 비워 보내면 서버가 채운다. [이 PC 에 저장] 을 켠 값은 서버가 저장한다.
+                const sendParams = { ...values };
+                for (const v of prompts) if (isSaved(v) && !changing.has(v.id)) delete sendParams[v.id];
+                const saveSecrets = secretsAvailable ? prompts.filter((v) => v.source.secret && saveFlag[v.id] && values[v.id]).map((v) => v.id) : [];
                 live.log = [];
-                const { runId } = await api('POST', '/api/runs', { recipeId: selected, uploadId: upload?.id, params: values, options: opts });
+                const { runId } = await api('POST', '/api/runs', { recipeId: selected, uploadId: upload?.id, params: sendParams, options: opts, ...(saveSecrets.length ? { saveSecrets } : {}) });
+                if (saveSecrets.length) {
+                  for (const id of saveSecrets) {
+                    delete values[id];
+                    changing.delete(id);
+                    saveFlag[id] = false;
+                  }
+                  await loadSecrets();
+                }
                 live.run = { runId, status: 'running', recipeName: detail.recipe.name };
                 drawLive();
                 drawSetup();
@@ -1361,6 +586,7 @@ async function runPage(params) {
 
   drawLive();
   if (presetUpload) upload = await api('GET', `/api/uploads/${encodeURIComponent(presetUpload)}`).catch((e) => (toast(`예시 입력을 찾지 못했습니다: ${e.message}`, 'error'), null));
+  aiUpload();
   await loadDetail();
   cleanup = onLive((type) => {
     if (type.startsWith('run-') || type === 'state') drawLive();
@@ -1416,14 +642,40 @@ async function reportPage(runId) {
   }
   const fileUrl = (p, dl) => `/api/runs/${runId}/file?path=${encodeURIComponent(p)}${dl ? '&download=1' : ''}`;
   const valueKeys = [...new Set(r.rows.flatMap((x) => Object.keys(x.values ?? {})))];
-  add(app, 
+  // AI 패널: 이 실행의 레시피 대화 + 보고 있는 실행
+  if (r.recipe?.id) setAiRecipe(r.recipe.id, { name: r.recipe.name });
+  else setAiScope({ page: 'report' });
+  setAiContext({ runId });
+  // [✦ AI 에게] 초안: 어느 스텝에서 무슨 오류로 멈췄는지 쉬운 첫 문장만 (자세한 오류는 맥락으로 따로 간다)
+  const clipAt = (s, n) => {
+    const t = String(s ?? '').replace(/\s+/g, ' ').trim();
+    if (t.length <= n) return t;
+    const cut = t.slice(0, n);
+    const at = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf(' '));
+    return `${(at > n / 2 ? cut.slice(0, at) : cut).replace(/[.\s]+$/, '')}…`;
+  };
+  const askRow = (row) => {
+    if (!r.recipe?.id) return null;
+    // 오류 첫 줄: "A. B." → "A (B)" — 첫 문장 + 이유는 괄호, 끝 마침표는 뗀다 (따옴표를 겹치지 않게)
+    const first = String(row.error ?? '').split('\n')[0].split(' 시도한 후보:')[0].trim().replace(/[.\s]+$/, '');
+    const [main, ...rest] = first.split(/\.\s+/);
+    const err = rest.length ? `${clipAt(main, 100)} (${clipAt(rest.join('. '), 90)})` : clipAt(main, 160);
+    const desc = row.failure?.desc ? clipAt(String(row.failure.desc).replace(/["“”]/g, ''), 40) : '';
+    const where = row.failure ? `${row.failure.no ?? ''} 스텝${desc ? `(${desc})` : ''}`.trim() : '';
+    return aiAskButton(`${row.rowNumber}행이 실패했습니다${where ? ` — ${where}` : ''}: ${err || '오류'}. 원인을 찾아 고쳐 줘.`, { runId, rowNumber: row.rowNumber });
+  };
+  const rid = r.recipe?.id;
+  add(app,
     h(
       'div',
       { class: 'page-head' },
       h('a', { href: '#/reports', class: 'muted' }, '← 리포트'),
-      h('h1', null, r.recipe?.name),
+      h('h1', null, rid ? h('a', { href: `#/recipe/${rid}`, class: 'title-link', title: '이 레시피 편집기로' }, r.recipe?.name) : r.recipe?.name),
       statusBadge(r.status),
       h('div', { class: 'spacer' }),
+      h('button', { class: 'ai-btn', onclick: () => toggleAi() }, '✦ AI 도우미'),
+      rid ? h('a', { class: 'btn', href: `#/recipe/${rid}` }, '편집') : null,
+      rid ? h('a', { class: 'btn', href: `#/run?recipe=${rid}` }, '▶ 다시 실행') : null,
       h('button', { onclick: safely(() => api('POST', `/api/runs/${runId}/open-folder`)) }, '폴더 열기'),
       r.rows.length ? h('a', { class: 'btn', href: fileUrl('results.xlsx', true) }, '결과 엑셀') : null,
       h(
@@ -1452,7 +704,7 @@ async function reportPage(runId) {
     r.rows.length
       ? h(
           'div',
-          { class: 'table-wrap', style: 'margin-bottom:16px' },
+          { class: 'table-wrap report-rows', style: 'margin-bottom:16px' },
           h(
             'table',
             null,
@@ -1460,24 +712,32 @@ async function reportPage(runId) {
             h(
               'tbody',
               null,
-              r.rows.map((row) =>
-                h(
+              r.rows.map((row) => {
+                // 760px 이하에서는 행마다 카드로 그린다 (칸 이름은 data-label) — 실패 행의 오류·[✦ AI 에게] 가 화면 안에 보이게
+                const files = row.files ?? [];
+                return h(
                   'tr',
-                  null,
-                  h('td', null, row.rowNumber),
-                  h('td', null, row.label),
-                  h('td', null, h('span', { class: `badge ${row.status === 'ok' ? 'ok' : 'bad'}` }, row.status === 'ok' ? '성공' : '실패'), h('div', { class: 'muted small' }, fmtDur(row.durationMs))),
-                  valueKeys.map((k) => h('td', null, row.values?.[k] ?? '')),
-                  h('td', null, (row.files ?? []).map((f) => h('div', null, h('a', { href: fileUrl(f), target: '_blank' }, f.replace(/^files[\\/]/, ''))))),
+                  { class: row.status === 'ok' ? 'row-ok' : 'row-fail' },
+                  h('td', { class: 'c-head', 'data-label': '행' }, h('span', { class: 'row-no' }, row.rowNumber)),
+                  h('td', { class: 'c-label', 'data-label': '데이터' }, row.label),
+                  h('td', { class: 'c-status', 'data-label': '결과' }, h('span', { class: `badge ${row.status === 'ok' ? 'ok' : 'bad'}` }, row.status === 'ok' ? '성공' : '실패'), h('span', { class: 'muted small dur' }, fmtDur(row.durationMs))),
+                  valueKeys.map((k) => {
+                    const v = row.values?.[k] ?? '';
+                    const n = String(v).includes('\n') ? String(v).split('\n').length : 0;
+                    return h('td', { class: `c-val${v === '' ? ' empty' : ''}`, 'data-label': k }, h('span', { class: 'vals' }, v), n ? h('div', { class: 'muted small' }, `${n}개`) : null);
+                  }),
+                  h('td', { class: `c-files${files.length ? '' : ' empty'}`, 'data-label': '파일' }, files.map((f) => h('div', null, h('a', { href: fileUrl(f), target: '_blank' }, f.replace(/^files[\\/]/, ''))))),
                   h(
                     'td',
-                    { style: 'max-width:360px' },
+                    { class: `c-error${row.status === 'ok' && !row.error ? ' empty' : ''}`, 'data-label': '오류' },
                     row.failure ? h('div', { class: 'small' }, h('b', null, row.failure.desc)) : null,
-                    row.error ? h('div', { class: 'small', style: 'color:var(--bad)' }, row.error) : null,
+                    row.error ? h('div', { class: 'small err-text' }, row.error) : null,
+                    row.errorDetail ? h('details', { class: 'err-detail small' }, h('summary', null, '자세히'), h('div', { class: 'mono' }, row.errorDetail)) : null,
                     row.screenshot ? h('a', { class: 'small', href: fileUrl(row.screenshot), target: '_blank' }, '실패 화면 보기') : null,
+                    row.status === 'ok' ? null : h('div', { style: 'margin-top:4px' }, askRow(row)),
                   ),
-                ),
-              ),
+                );
+              }),
             ),
           ),
         )
@@ -2410,5 +1670,6 @@ function hubSourcesCard(s, redraw) {
 }
 
 // ---------- 시작 ----------
+initAiPanel();
 connect();
 route();

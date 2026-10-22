@@ -16,6 +16,8 @@ import { recipeProblems, excelColumnsOf, promptVariablesOf, autoLinkExcel } from
 import { Settings } from './settings.js';
 import { startBrowser, profileNameFor } from './browser.js';
 import { AgentSession } from './ai/agent.js';
+import { ThreadStore } from './ai/thread.js';
+import { secretVariablesOf } from './secrets.js';
 import { setDraft, buildSet, inspectSet, publicPreview, installSet, installedSets, readSet, ENGINE_VERSION } from './set/index.js';
 import { hubList, hubReadme, resolveHubSet, downloadHubSet } from './set/hub.js';
 
@@ -32,6 +34,10 @@ const HOST = argOf('--host', '127.0.0.1');
 const ALLOWED_HOSTS = new Set(['localhost', ...String(argOf('--allow-host', process.env.WEB_RPA_ALLOWED_HOSTS ?? '')).split(',').map((h) => h.trim().toLowerCase()).filter(Boolean)]);
 const store = new Store(path.resolve(argOf('--workspace', path.join(ROOT, 'workspace'))));
 const settings = new Settings(store.root);
+const secrets = store.secrets;
+const threads = new ThreadStore(store.root);
+threads.cleanup(); // 30일 넘게 쓰지 않은 AI 대화 정리
+store.migrateSecrets().catch((e) => console.warn(`비밀값 옮기기 실패: ${e.message}`));
 
 /** 설정된 브라우저와 그 브라우저 전용 프로필 폴더. */
 function browserTarget() {
@@ -52,8 +58,34 @@ function broadcast(type, data) {
   for (const res of clients) res.write(msg);
 }
 
-const agents = new Map(); // sessionId → AgentSession
+const agents = new Map(); // recipeId → AgentSession (대화는 레시피 단위)
+const sessionAlias = new Map(); // 옛 화면의 sessionId → recipeId
 let agentTurns = 0; // 진행 중인 AI 턴 (화면 관찰 브라우저가 같은 프로필을 쓴다)
+
+function agentFor(recipeId) {
+  threads.checkId(recipeId);
+  let s = agents.get(recipeId);
+  if (!s) {
+    s = new AgentSession({
+      recipeId,
+      threads,
+      store,
+      secrets,
+      settings,
+      browserTarget,
+      canObserve: browserBusy,
+      onProgress: (e) => broadcast('agent-progress', e),
+      onDelta: (e) => broadcast('agent-delta', e),
+    });
+    agents.set(recipeId, s);
+  }
+  return s;
+}
+
+/** 녹화·실행·브라우저 시험 전에 열어 둔 관찰 브라우저를 닫는다 (같은 프로필을 두 번 열 수 없다) */
+async function closeObservers() {
+  await Promise.all([...agents.values()].map((s) => s.closeObserver()));
+}
 
 /** 브라우저 프로필을 쓰는 작업(녹화·실행)이 진행 중인지. */
 function browserBusy() {
@@ -255,6 +287,7 @@ route('POST', '/api/hub/install', async ({ req }) => {
 route('POST', '/api/record/start', async ({ req }) => {
   const b = busy();
   if (b) throw new HttpError(409, b);
+  await closeObservers();
   const { name, startUrl } = await readJson(req);
   let url;
   try {
@@ -311,11 +344,13 @@ route('POST', '/api/record/stop', async () => {
 route('POST', '/api/runs', async ({ req }) => {
   const b = busy();
   if (b) throw new HttpError(409, b);
-  const { recipeId, uploadId, params = {}, options = {} } = await readJson(req);
+  const { recipeId, uploadId, params: given = {}, options = {}, saveSecrets = [] } = await readJson(req);
   const recipe = await store.getRecipe(recipeId);
   const problems = recipeProblems(recipe);
   if (problems.length) throw new HttpError(400, `레시피에 고칠 점이 있습니다:\n- ${problems.join('\n- ')}`);
   const excelPath = uploadId ? store.uploadPath(uploadId) : undefined;
+  const params = await secretParams(recipe, given && typeof given === 'object' ? given : {}, saveSecrets);
+  await closeObservers();
   const runId = store.newRunId();
   const runDir = store.runDir(runId);
   const runner = new Runner({
@@ -339,7 +374,7 @@ route('POST', '/api/runs', async ({ req }) => {
   runner.on('log', (e) => broadcast('run-log', { runId, ...e }));
   runner.on('status', (e) => {
     r.waiting = e.status === 'waiting-user' ? e.message : null;
-    broadcast('run-status', { runId, status: e.status, message: e.message, report: e.report ? { totals: e.report.totals, status: e.report.status } : undefined });
+    broadcast('run-status', { runId, recipeId, recipeName: recipe.name, status: e.status, message: e.message, report: e.report ? { totals: e.report.totals, status: e.report.status } : undefined });
   });
   runner.on('progress', (e) => {
     r.progress = e;
@@ -356,6 +391,33 @@ route('POST', '/api/runs', async ({ req }) => {
   runner.start().catch((e) => broadcast('notice', { level: 'error', message: `실행 오류: ${e.message}` }));
   return { runId };
 });
+/** 실행 입력값: 저장하라고 한 비밀값은 저장하고, 비어 있는 비밀값은 저장된 값으로 채운다 */
+async function secretParams(recipe, given, saveSecrets) {
+  const params = { ...given };
+  const vars = secretVariablesOf(recipe);
+  if (!vars.length) return params;
+  const valueOf = (v) => params[v.id] ?? params[v.name];
+  const empty = (x) => x === undefined || x === null || x === '';
+  const toSave = {};
+  for (const id of Array.isArray(saveSecrets) ? saveSecrets : []) {
+    const v = vars.find((x) => x.id === id || x.name === id);
+    const val = v ? valueOf(v) : undefined;
+    if (v && typeof val === 'string' && val !== '') toSave[v.id] = val;
+  }
+  if (Object.keys(toSave).length) {
+    try {
+      await secrets.setMany(recipe.id, toSave);
+    } catch (e) {
+      broadcast('notice', { level: 'warn', message: `비밀값을 저장하지 못했습니다: ${e.message}` });
+    }
+  }
+  if (vars.some((v) => empty(valueOf(v)))) {
+    const saved = await secrets.getAll(recipe.id).catch(() => ({}));
+    for (const v of vars) if (empty(valueOf(v)) && saved[v.id]) params[v.id] = saved[v.id];
+  }
+  return params;
+}
+
 route('POST', '/api/runs/current/:action', ({ p }) => {
   if (!run) throw new HttpError(409, '진행 중인 실행이 없습니다.');
   const { runner } = run;
@@ -390,6 +452,7 @@ route('POST', '/api/settings/test-browser', async () => {
   // 설정된 브라우저를 실제로 띄워 버전을 확인한다 (숨김, 빈 페이지).
   const b = busy();
   if (b) throw new HttpError(409, b);
+  await closeObservers();
   const t = browserTarget();
   agentTurns += 1; // 시험하는 동안 녹화·실행 시작을 막는다 (같은 프로필)
   let ctx;
@@ -407,34 +470,108 @@ route('POST', '/api/settings/test-browser', async () => {
   }
 });
 
+// ---------- AI 도우미 대화 (레시피 단위, 파일로 남는다) ----------
+const recipeIdOf = (v) => {
+  const id = typeof v === 'string' ? v : '';
+  if (!/^[\w-]{1,80}$/.test(id)) throw new HttpError(400, '잘못된 레시피 id 입니다.');
+  return id;
+};
+const idle = (session) => {
+  if (session.running) throw new HttpError(409, '이 레시피의 AI 요청을 처리하는 중입니다. 답변이 끝난 뒤 다시 시도해 주세요.');
+  return session;
+};
+
+route('GET', '/api/agent/thread', ({ url }) => agentFor(recipeIdOf(url.searchParams.get('recipeId'))).view());
+
 route('POST', '/api/agent/turn', async ({ req }) => {
-  const { sessionId, recipe, message, allowRisky, previousApplied } = await readJson(req);
-  if (!sessionId || !/^[\w-]{6,80}$/.test(sessionId)) throw new HttpError(400, '잘못된 세션입니다.');
+  const body = await readJson(req);
+  const { sessionId, recipe, message, context, allowRisky, previousApplied } = body;
+  // 옛 화면: sessionId 만 보낸다 → 레시피 id 로 대화를 찾는다
+  const legacy = !body.recipeId;
+  if (legacy && (!sessionId || !/^[\w-]{6,80}$/.test(sessionId))) throw new HttpError(400, '잘못된 세션입니다.');
   if (!recipe?.blocks) throw new HttpError(400, '레시피가 없습니다.');
   if (!String(message ?? '').trim()) throw new HttpError(400, '요청을 입력해 주세요.');
-  for (const [id, s] of agents) if (Date.now() - s.touchedAt > 3600_000) agents.delete(id); // 1시간 지난 대화 정리
-  let session = agents.get(sessionId);
-  if (!session) {
-    session = new AgentSession({ id: sessionId, settings, browserTarget, canObserve: browserBusy, onProgress: (e) => broadcast('agent-progress', e) });
-    agents.set(sessionId, session);
-  }
-  if (session.running) throw new HttpError(409, '이전 요청을 처리하는 중입니다.');
+  const recipeId = recipeIdOf(body.recipeId ?? recipe.id ?? sessionId);
+  if (legacy) sessionAlias.set(sessionId, recipeId);
+  const session = idle(agentFor(recipeId));
   session.running = true;
   agentTurns += 1;
   try {
-    const result = await session.turn({ message: String(message), recipe, allowRisky: !!allowRisky, previousApplied: previousApplied !== false });
-    return { ...result, problems: recipeProblems(result.recipe) };
+    return await session.turn({ message: String(message), recipe, context, allowRisky: !!allowRisky, legacy, sessionId, previousApplied: previousApplied !== false });
   } catch (e) {
     throw new HttpError(e.status && e.status >= 400 && e.status < 600 ? e.status : 500, e.message);
   } finally {
     session.running = false;
     agentTurns -= 1;
+    broadcast('agent-done', { recipeId, sessionId: session.sessionId });
   }
 });
+
+route('POST', '/api/agent/pending', async ({ req }) => {
+  const { recipeId: rid, action, save } = await readJson(req);
+  const recipeId = recipeIdOf(rid);
+  const session = idle(agentFor(recipeId));
+  const pending = session.thread.pending;
+  if (!pending) throw new HttpError(409, '대기 중인 AI 제안이 없습니다.');
+  if (action === 'discard') {
+    session.settlePending('discard');
+    return { ok: true };
+  }
+  if (action !== 'apply') throw new HttpError(400, 'action 은 apply 또는 discard 입니다.');
+  let recipe = structuredClone(pending.recipe);
+  if (save) {
+    await store.getRecipe(recipeId); // 없는 레시피면 404
+    recipe = await store.saveRecipe({ ...recipe, id: recipeId });
+  }
+  session.settlePending('apply');
+  return { recipe, problems: recipeProblems(recipe) };
+});
+
+route('DELETE', '/api/agent/thread', ({ url }) => {
+  idle(agentFor(recipeIdOf(url.searchParams.get('recipeId')))).clear();
+  return { ok: true };
+});
+
+route('PUT', '/api/agent/notes', async ({ req }) => {
+  const { recipeId, text } = await readJson(req);
+  return { ok: true, notes: threads.setNotes(recipeIdOf(recipeId), text) };
+});
+
+// 옛 화면의 [새 대화]: 그 레시피 대화를 지운다
 route('POST', '/api/agent/reset', async ({ req }) => {
   const { sessionId } = await readJson(req);
-  agents.delete(sessionId);
+  const recipeId = sessionAlias.get(sessionId) ?? (threads.exists(sessionId) ? sessionId : null);
+  sessionAlias.delete(sessionId);
+  const session = recipeId ? agents.get(recipeId) ?? agentFor(recipeId) : null;
+  if (session && !session.running) session.clear();
   return { ok: true };
+});
+
+// ---------- 비밀값 (이 PC 에만, Windows 계정으로 암호화) ----------
+async function secretVar(recipeId, varId) {
+  const recipe = await store.getRecipe(recipeId);
+  const name = decodeURIComponent(varId);
+  const v = secretVariablesOf(recipe).find((x) => x.id === name || x.name === name);
+  if (!v) throw new HttpError(404, `비밀 변수 "${name}" 이(가) 이 레시피에 없습니다.`);
+  return v;
+}
+route('GET', '/api/recipes/:id/secrets', async ({ p }) => {
+  const recipe = await store.getRecipe(p.id);
+  const saved = secrets.savedOf(recipe.id);
+  return secretVariablesOf(recipe).map((v) => ({ varId: v.id, name: v.name ?? v.id, saved: Object.hasOwn(saved, v.id), savedAt: saved[v.id] ?? null }));
+});
+route('PUT', '/api/recipes/:id/secrets/:varId', async ({ req, p }) => {
+  const v = await secretVar(p.id, p.varId);
+  const { value } = await readJson(req);
+  if (typeof value !== 'string' || !value) throw new HttpError(400, '저장할 값을 입력해 주세요.');
+  if (!secrets.available) throw new HttpError(400, secrets.unavailableReason);
+  await secrets.set(p.id, v.id, value);
+  return { ok: true, varId: v.id, saved: true, savedAt: secrets.savedOf(p.id)[v.id] ?? null };
+});
+route('DELETE', '/api/recipes/:id/secrets/:varId', async ({ p }) => {
+  const v = await secretVar(p.id, p.varId);
+  secrets.delete(p.id, v.id);
+  return { ok: true, varId: v.id, saved: false };
 });
 
 route('GET', '/api/events', ({ req, res }) => {
@@ -507,6 +644,7 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, async () => {
     run?.runner.stop();
     await recording?.stop().catch(() => {});
+    await closeObservers();
     process.exit(0);
   });
 }

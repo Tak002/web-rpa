@@ -12,6 +12,7 @@ import { Session, StopSignal } from './session.js';
 import { Executor } from './executor.js';
 import { writeRunFiles } from './report.js';
 import { guardSites, normOrigin } from './sites.js';
+import { stepNumbers } from '../../public/shared/recipe-edit.js';
 
 const pad = (n) => String(n).padStart(2, '0');
 const firstLine = (s) => String(s ?? '').split('\n')[0];
@@ -267,9 +268,18 @@ export class Runner extends EventEmitter {
   onStep(e) {
     if (e.status === 'start') {
       this.lastStep = { stepId: e.stepId, block: e.block, index: e.index, desc: e.desc };
-      this.log('info', `  ${e.block === (this.recipe.entryBlock || 'main') ? '' : `[${e.block}] `}${e.index + 1}. ${e.desc}`);
+      // 화면(편집기)과 같은 전역 번호(#2.2). 번호가 없으면(어디서도 부르지 않는 블록) 블록 이름과 블록 안 번호
+      const no = this.numberOf(e.stepId);
+      this.log('info', `  ${no ?? `${e.block === (this.recipe.entryBlock || 'main') ? '' : `[${e.block}] `}${e.index + 1}.`} ${e.desc}`);
     } else if (e.status === 'ok' && e.note) this.log('info', `     → ${e.note}`);
     this.emit('step', e);
+  }
+
+  /** 스텝의 전역 번호 (#2.2) — 없으면 undefined */
+  numberOf(stepId) {
+    this.numbers ??= stepNumbers(this.recipe);
+    const no = this.numbers.get(stepId);
+    return no && no !== '#-' ? no : undefined;
   }
 
   rowLabel(values) {
@@ -311,8 +321,11 @@ export class Runner extends EventEmitter {
       const e = this.rowBlocked && !e0.stop ? Object.assign(this.blockedError(), { failure: e0.failure ?? this.lastStep ?? undefined }) : e0;
       result.status = 'failed';
       result.error = e.stop ? '사용자가 실행을 중지했습니다.' : firstLine(e.message);
-      if (e.failure) result.failure = e.failure;
-      this.log(e.stop ? 'warn' : 'error', `${rowNumber}행 실패: ${result.error}${e.failure ? ` [스텝 ${e.failure.stepId}: ${e.failure.desc}]` : ''}`);
+      const detail = e.stop ? '' : String(e.message ?? '').split('\n').slice(1).join('\n').trim();
+      if (detail) result.errorDetail = detail; // 리포트에서 [자세히] 로 접어 보인다 (시도한 후보 등)
+      if (e.failure) result.failure = { ...e.failure, ...(this.numberOf(e.failure.stepId) ? { no: this.numberOf(e.failure.stepId) } : {}) }; // no: 화면 번호 (#2.1)
+      this.log(e.stop ? 'warn' : 'error', `${rowNumber}행 실패: ${result.error}${e.failure ? ` [스텝 ${this.numberOf(e.failure.stepId) ?? e.failure.stepId}: ${e.failure.desc}]` : ''}`);
+      if (detail) this.log('info', `     ${clip(detail.replace(/\s+/g, ' '), 400)}`);
       result.screenshot = await this.failureShot(rowNumber);
     }
     result.durationMs = Date.now() - t0;

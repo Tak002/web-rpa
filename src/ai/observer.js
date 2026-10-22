@@ -1,5 +1,6 @@
 // AI 화면 관찰기: 숨긴 브라우저로 레시피를 지정 스텝까지 실행한 뒤 화면 요소 목록(참조 번호 f<프레임>e<번호>)을 만들고,
-// 참조 번호로 녹화기와 같은 규칙의 타겟 번들을 돌려준다. 출력 스텝은 건너뛰고, 되돌릴 수 없는 버튼은 허용 없이는 누르지 않는다.
+// 참조 번호로 녹화기와 같은 규칙의 타겟 번들을 돌려준다(목록 항목 기준 상대 타겟·목록 items 타겟도). 출력 스텝은 건너뛰고,
+// 되돌릴 수 없는 버튼은 허용 없이는 누르지 않는다. 실행 때 입력값(params, 비밀값 포함)을 넣되 비밀값은 로그·관찰 결과에서 가린다.
 
 import os from 'node:os';
 import path from 'node:path';
@@ -9,6 +10,7 @@ import { Executor, Signal } from '../engine/executor.js';
 import { Scope } from '../engine/vars.js';
 import { doNavigate } from '../engine/actions.js';
 import { targetName } from '../../public/shared/steps.js';
+import { stepNumbers } from '../../public/shared/recipe-edit.js';
 
 const OUTPUT_STEPS = new Set(['pdf', 'screenshot', 'download', 'upload']);
 // 제출·신고·결제·삭제·발송처럼 되돌릴 수 없는 동작의 버튼 이름
@@ -16,6 +18,7 @@ const RISKY = /제출|신고|결제|삭제|발송|송금|이체|납부하기|전
 const MAX_PER_FRAME = 250;
 const MAX_LINES = 600;
 const firstLine = (s) => String(s ?? '').split('\n')[0];
+const twoLines = (s) => String(s ?? '').split('\n').slice(0, 2).join(' — ');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const TOKEN_ONLY = /^\{\{\s*([^{}|]+?)\s*(?:\|[^{}]*)?\}\}$/;
 
@@ -49,13 +52,15 @@ const riskError = (name, step) =>
 
 export class Observer {
   /**
-   * @param {{recipe: object, profileDir: string, browser?: object, sampleRow?: object, allowRisky?: boolean, onLog?: (m: string) => void}} o
+   * @param {{recipe: object, profileDir: string, browser?: object, sampleRow?: object, params?: object, allowRisky?: boolean, onLog?: (m: string) => void}} o
+   *   params: 실행 때 입력값 { 변수 id(또는 이름): 값 } — 비밀값 포함. 기본값 위에 덮는다. 비밀값은 로그·관찰 결과에 남기지 않는다.
    */
-  constructor({ recipe, profileDir, browser, sampleRow = {}, allowRisky = false, onLog }) {
+  constructor({ recipe, profileDir, browser, sampleRow = {}, params = {}, allowRisky = false, onLog }) {
     this.recipe = recipe;
     this.profileDir = profileDir;
     this.browser = browser;
     this.sampleRow = sampleRow ?? {};
+    this.params = params ?? {};
     this.allowRisky = !!allowRisky;
     this.onLog = onLog;
     this.ctx = null;
@@ -65,10 +70,41 @@ export class Observer {
 
   note(m) {
     try {
-      this.onLog?.(m);
+      this.onLog?.(this.mask(m));
     } catch {
       /* 로그 실패는 무시 */
     }
+  }
+
+  /** 이번 실행의 입력값: prompt 변수 기본값 위에 params 를 덮는다 { 변수 id: 값 } */
+  runParams() {
+    const vars = this.recipe?.variables ?? [];
+    const out = {};
+    for (const v of vars) if (v?.source?.kind === 'prompt') out[v.id] = v.source.default ?? '';
+    for (const [k, val] of Object.entries(this.params ?? {})) {
+      if (val === undefined || val === null || val === '') continue;
+      const v = vars.find((x) => x?.id === k) ?? vars.find((x) => x?.name === k);
+      out[v ? v.id : k] = String(val);
+    }
+    return out;
+  }
+
+  /** 비밀 변수 값 (긴 것부터) */
+  secretValues() {
+    const params = this.runParams();
+    const vals = new Set();
+    for (const v of this.recipe?.variables ?? []) {
+      if (!v?.source?.secret) continue;
+      for (const x of [params[v.id], params[v.name], this.params?.[v.id], this.params?.[v.name], v.source.default]) if (x !== undefined && x !== null && String(x).length >= 2) vals.add(String(x));
+    }
+    return [...vals].sort((a, b) => b.length - a.length);
+  }
+
+  /** 글자 안의 비밀값을 •••• 로 가린다 */
+  mask(text) {
+    let s = String(text ?? '');
+    for (const v of this.secretValues()) s = s.split(v).join('••••');
+    return s;
   }
 
   async open() {
@@ -147,8 +183,7 @@ export class Observer {
     sess.aborted = false;
     await sess.resetRow();
     const recipe = this.recipe;
-    const params = {};
-    for (const v of recipe.variables ?? []) if (v?.source?.kind === 'prompt') params[v.id] = v.source.default ?? '';
+    const params = this.runParams();
     const missing = new Set();
     const scope = new Scope({
       recipe,
@@ -187,6 +222,7 @@ export class Observer {
         return { ok: true };
       }
       if (!Object.values(recipe.blocks ?? {}).some((steps) => Array.isArray(steps) && steps.some((s) => s?.id === stepId))) return { ok: false, error: `스텝 ${stepId} 이(가) 레시피에 없습니다.` };
+      const numbers = stepNumbers(recipe); // 화면과 같은 전역 번호(#2.2)로 적는다
       const executor = new Executor({
         recipe,
         log: (_level, m) => this.note(m),
@@ -202,7 +238,8 @@ export class Observer {
             if (step.id === stepId) throw new Signal('관찰 목표 스텝까지 실행했습니다.', { reached: true });
           },
           step: (e) => {
-            if (e.status === 'start') this.note(`${e.block === (recipe.entryBlock || 'main') ? '' : `[${e.block}] `}${e.index + 1}. ${e.desc}`);
+            const no = numbers.get(e.stepId);
+            if (e.status === 'start') this.note(`${no && no !== '#-' ? no : `${e.block === (recipe.entryBlock || 'main') ? '' : `[${e.block}] `}${e.index + 1}.`} ${e.desc}`);
             if (e.status === 'skip' && e.note) this.note(`   건너뜀: ${e.note}`);
           },
         },
@@ -215,7 +252,7 @@ export class Observer {
         return { ok: true };
       }
       await this.settle().catch(() => {});
-      return { ok: false, error: firstLine(e.message), failedStep: e.failure?.stepId };
+      return { ok: false, error: this.mask(twoLines(e.message)), failedStep: e.failure?.stepId }; // 쉬운 첫 문장 + 자세히(시도한 후보)
     }
   }
 
@@ -249,16 +286,45 @@ export class Observer {
       if (!snap.lines.length) out.push('(보이는 요소 없음)');
       if (snap.truncated) out.push(`(요소가 많아 앞 ${MAX_PER_FRAME}개만 보여 줍니다)`);
     }
-    return out.join('\n');
+    return this.mask(out.join('\n'));
   }
 
-  /** 참조 번호 → 타겟 번들 (녹화기와 같은 규칙) */
-  async targetFor(ref) {
+  /** 참조 번호 f<프레임>e<번호> → { frame, n, fi } */
+  refOf(ref) {
     const m = /^f(\d+)e(\d+)$/.exec(String(ref ?? '').trim());
     if (!m) throw new Error(`참조 번호 형식이 아닙니다: "${ref}" (예: f0e12)`);
     const frame = this.refFrames[Number(m[1])];
     if (!this.sess || !frame || frame.isDetached()) throw new Error(`프레임 f${m[1]} 을(를) 찾을 수 없습니다. 화면을 다시 관찰해 주세요.`);
-    const t = await this.sess.callLib(frame, 'targetOfRef', Number(m[2]));
-    return { framePath: framePathOf(frame), candidates: t.candidates, meta: t.meta };
+    return { frame, n: Number(m[2]), fi: Number(m[1]) };
+  }
+
+  /**
+   * 참조 번호 → 타겟 번들 (녹화기와 같은 규칙).
+   * withinRef(목록 항목 안의 아무 요소)를 주면 그 항목 기준 상대 후보만 담고 within: 'item' 을 붙인다 (forEach 몸통용).
+   */
+  async targetFor(ref, { withinRef } = {}) {
+    const a = this.refOf(ref);
+    if (withinRef) {
+      const b = this.refOf(withinRef);
+      if (a.fi !== b.fi) throw new Error('대상 요소와 목록 항목이 서로 다른 프레임에 있습니다.');
+      const t = await this.sess.callLib(a.frame, 'relativeTargetOf', a.n, b.n);
+      if (!t.candidates.length) throw new Error('항목 안에서 이 요소를 하나로 가리키는 후보를 만들지 못했습니다. 다른 요소를 골라 주세요.');
+      return { framePath: framePathOf(a.frame), within: 'item', candidates: t.candidates, meta: t.meta };
+    }
+    const t = await this.sess.callLib(a.frame, 'targetOfRef', a.n);
+    return { framePath: framePathOf(a.frame), candidates: t.candidates, meta: t.meta };
+  }
+
+  /**
+   * 참조 번호의 요소가 들어 있는 목록(같은 모양의 형제들: 표의 행·목록 항목·같은 클래스 카드)에 맞는 forEach items 타겟.
+   * @returns {Promise<{target: object, count: number, sample: string[]}>}
+   */
+  async listTargetFor(ref) {
+    const a = this.refOf(ref);
+    const t = await this.sess.callLib(a.frame, 'listTargetOf', a.n);
+    if (!t.candidates.length) throw new Error(`목록(${t.meta?.label ?? '항목'} ${t.count}개)을 모두 가리키는 선택자를 만들지 못했습니다.`);
+    const meta = { ...t.meta, text: t.meta?.text ? this.mask(t.meta.text) : undefined };
+    if (!meta.text) delete meta.text;
+    return { target: { framePath: framePathOf(a.frame), candidates: t.candidates, meta }, count: t.count, sample: t.sample.map((s) => this.mask(s)) };
   }
 }

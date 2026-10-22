@@ -57,6 +57,8 @@ export class Settings {
       browser: { id: b.id, path: this.data.browser?.path ?? '', profile: profileNameFor(b.id), choices: detectBrowsers() },
       hubSources: this.hubSources,
       hubDefault: DEFAULT_HUB,
+      // 비밀값 "이 PC 에 저장" 은 Windows 계정 암호화(DPAPI)를 쓴다
+      secrets: { available: process.platform === 'win32' },
     };
   }
 
