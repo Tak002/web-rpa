@@ -1,4 +1,5 @@
-// 작업 폴더: recipes/ (레시피 JSON), runs/ (실행 결과), uploads/ (엑셀), profiles/ (브라우저 프로필), trash/, sets/ (설치한 세트 — src/set/index.js)
+// 작업 폴더: recipes/ (레시피 JSON), runs/ (실행 결과), uploads/ (엑셀), profiles/ (브라우저 프로필), trash/, sets/ (설치한 세트 — src/set/index.js),
+// ai/ (AI 대화 — src/ai/thread.js), secrets.json (비밀값 — src/secrets.js). 레시피에는 비밀값을 두지 않는다.
 
 import fs from 'node:fs/promises';
 import fssync from 'node:fs';
@@ -6,6 +7,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { excelColumnsOf } from './recipe.js';
 import { safeFileName } from './engine/naming.js';
+import { SecretStore, moveSecretDefaults } from './secrets.js';
 
 const SAFE_ID = /^[\w-]{1,80}$/;
 
@@ -20,6 +22,23 @@ export class Store {
       profile: path.join(root, 'profiles', 'default'),
     };
     for (const d of Object.values(this.dirs)) fssync.mkdirSync(d, { recursive: true });
+    this.secrets = new SecretStore(root);
+  }
+
+  /** 서버를 시작할 때: 예전 레시피 파일에 남은 비밀 기본값·녹화값을 저장소로 옮긴다 */
+  async migrateSecrets() {
+    for (const f of await fs.readdir(this.dirs.recipes)) {
+      if (!f.endsWith('.json')) continue;
+      const text = await fs.readFile(path.join(this.dirs.recipes, f), 'utf8').catch(() => '');
+      if (text.includes('"secret": true')) await this.getRecipe(f.slice(0, -5)).catch(() => {});
+    }
+  }
+
+  async writeRecipe(recipe) {
+    const file = path.join(this.dirs.recipes, `${recipe.id}.json`);
+    const tmp = `${file}.${process.pid}.tmp`;
+    await fs.writeFile(tmp, JSON.stringify(recipe, null, 2));
+    await fs.rename(tmp, file); // 원자적 교체
   }
 
   checkId(id) {
@@ -51,11 +70,15 @@ export class Store {
 
   async getRecipe(id) {
     this.checkId(id);
+    let recipe;
     try {
-      return JSON.parse(await fs.readFile(path.join(this.dirs.recipes, `${id}.json`), 'utf8'));
+      recipe = JSON.parse(await fs.readFile(path.join(this.dirs.recipes, `${id}.json`), 'utf8'));
     } catch {
       throw Object.assign(new Error('레시피를 찾을 수 없습니다.'), { status: 404 });
     }
+    // 예전에 레시피 안에 평문으로 저장한 비밀 기본값: 읽을 때 저장소로 옮기고 파일에서도 지운다
+    if (recipe?.id === id && (await moveSecretDefaults(this.secrets, recipe))) await this.writeRecipe(recipe);
+    return recipe;
   }
 
   async saveRecipe(recipe) {
@@ -63,10 +86,8 @@ export class Store {
     this.checkId(recipe.id);
     recipe.updatedAt = new Date().toISOString();
     recipe.createdAt ??= recipe.updatedAt;
-    const file = path.join(this.dirs.recipes, `${recipe.id}.json`);
-    const tmp = `${file}.${process.pid}.tmp`;
-    await fs.writeFile(tmp, JSON.stringify(recipe, null, 2));
-    await fs.rename(tmp, file); // 원자적 교체
+    await moveSecretDefaults(this.secrets, recipe); // 비밀값은 레시피 파일에 남기지 않는다
+    await this.writeRecipe(recipe);
     return recipe;
   }
 

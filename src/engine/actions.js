@@ -321,7 +321,8 @@ export async function doExtract(rc, step) {
     step.attr || null,
   );
   const name = String(step.saveAs).trim();
-  rc.scope.extracted[name] = String(value ?? '');
+  if (typeof rc.scope.saveExtract === 'function') rc.scope.saveExtract(name, value);
+  else rc.scope.extracted[name] = String(value ?? '');
   return `{{${name}}} = "${clip(value, 60)}"`;
 }
 

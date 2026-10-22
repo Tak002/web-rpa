@@ -1,9 +1,10 @@
-// 조건 판정 (wait·assert·branch): exists · textVisible · urlContains · varEquals · dialogContains · not · all · any
-// 조건 안에서 정의되지 않은 변수는 거짓으로 본다.
+// 조건 판정 (wait·assert·branch·repeat): exists · textVisible · urlContains · varEquals · dialogContains · not · all · any
+// · varContains · varCompare · varEmpty · matches · elementText · elementCount
+// 조건 안에서 정의되지 않은 변수는 거짓으로 본다 (varEmpty 만 "비어 있음"으로 본다).
 
-import { locate } from './locate.js';
+import { locate, findList } from './locate.js';
 import { UndefinedVariableError } from './vars.js';
-import { conditionText } from '../../public/shared/steps.js';
+import { conditionText, COMPARE_OPS } from '../../public/shared/steps.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const cleanVarName = (v) => String(v ?? '').replace(/^\{\{|\}\}$/g, '').trim();
@@ -23,6 +24,84 @@ export async function checkCondition(rc, cond) {
     if (e instanceof UndefinedVariableError || e.notFound) return false;
     throw e;
   }
+}
+
+// ---------- 값 비교 ----------
+const numberOf = (s) => {
+  const t = String(s ?? '').trim().replace(/,/g, '');
+  return /^[+-]?(\d+\.?\d*|\.\d+)$/.test(t) ? Number(t) : null;
+};
+/** YYYY-MM-DD · YYYY.MM.DD · YYYY/MM/DD · YYYYMMDD → 비교용 숫자 YYYYMMDD (아니면 null) */
+const dateOf = (s) => {
+  const t = String(s ?? '').trim();
+  const m = /^(\d{4})[-./](\d{1,2})[-./](\d{1,2})\.?$/.exec(t) || /^(\d{4})(\d{2})(\d{2})$/.exec(t);
+  if (!m) return null;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  return mo >= 1 && mo <= 12 && d >= 1 && d <= 31 ? y * 10000 + mo * 100 + d : null;
+};
+
+/** a op b — 양쪽이 숫자(쉼표 허용)면 숫자, 날짜면 날짜, 아니면 글자(앞뒤 공백 무시)로 비교한다 */
+export function compareValues(a, op, b) {
+  if (!COMPARE_OPS.includes(op)) throw new Error(`알 수 없는 비교 기호 "${op}" (= != > < >= <= 중 하나)`);
+  let x = numberOf(a);
+  let y = numberOf(b);
+  if (x === null || y === null) {
+    x = dateOf(a);
+    y = dateOf(b);
+  }
+  if (x === null || y === null) {
+    x = String(a ?? '').trim();
+    y = String(b ?? '').trim();
+  }
+  switch (op) {
+    case '=':
+      return x === y;
+    case '!=':
+      return x !== y;
+    case '>':
+      return x > y;
+    case '<':
+      return x < y;
+    case '>=':
+      return x >= y;
+    default:
+      return x <= y;
+  }
+}
+
+function regexOf(pattern, flags) {
+  const f = String(flags ?? '');
+  if (!/^[dgimsuyv]*$/.test(f)) throw new Error(`정규식 옵션 "${f}" 이(가) 올바르지 않습니다 (i·m·s·u 등).`);
+  try {
+    return new RegExp(String(pattern ?? ''), f.replace(/[gy]/g, ''));
+  } catch (e) {
+    throw new Error(`정규식이 올바르지 않습니다: /${pattern}/ (${e.message})`);
+  }
+}
+
+/** 조건의 var 칸 값 (변수·값 읽기 이름·item.text·item.cell:2·loop.index·row). 정의 안 됐으면 undefined. */
+const varValue = (scope, name) => {
+  const n = cleanVarName(name);
+  return n ? scope.get(n) : undefined;
+};
+
+/** 요소의 글자 (입력 요소는 값) */
+async function elementTextOf(rc, target) {
+  const loc = await locate(rc.sess, target, rc.scope, { timeout: 0, purpose: 'exists' });
+  try {
+    return String(await loc.handle.evaluate((el) => (window.__webRpa ? window.__webRpa.valueOf(el, null) : String(el.innerText ?? el.value ?? ''))));
+  } finally {
+    await loc.handle.dispose().catch(() => {});
+  }
+}
+
+function textMatches(text, op, value, flags) {
+  const t = String(text ?? '').replace(/\s+/g, ' ').trim();
+  const v = String(value ?? '').replace(/\s+/g, ' ').trim();
+  if (op === 'equals') return t === v;
+  if (op === 'matches') return !!v && regexOf(value, flags).test(t);
+  if (op === 'contains' || op === undefined) return !!v && t.includes(v);
+  throw new Error(`알 수 없는 글자 비교 "${op}" (equals·contains·matches 중 하나)`);
 }
 
 async function check(rc, c) {
@@ -58,6 +137,36 @@ async function check(rc, c) {
       const v = scope.resolve(c.value ?? '');
       return !!v && String(sess.lastDialogMessage ?? '').includes(v);
     }
+    case 'varContains': {
+      const v = varValue(scope, c.var);
+      const want = scope.resolve(String(c.value ?? ''));
+      return v !== undefined && !!want && String(v).includes(want);
+    }
+    case 'varCompare': {
+      const v = varValue(scope, c.var);
+      if (v === undefined) return false;
+      return compareValues(v, c.op ?? '=', scope.resolve(String(c.value ?? '')));
+    }
+    case 'varEmpty': {
+      const v = varValue(scope, c.var);
+      return v === undefined || v === null || String(v).trim() === ''; // 값 읽기를 건너뛰어 값이 없는 것도 비어 있음
+    }
+    case 'matches': {
+      const v = varValue(scope, c.var);
+      const pattern = scope.resolve(String(c.pattern ?? ''));
+      if (v === undefined || !pattern) return false;
+      return regexOf(pattern, c.flags).test(String(v));
+    }
+    case 'elementText': {
+      const text = await elementTextOf(rc, c.target);
+      return textMatches(text, c.op ?? 'contains', scope.resolve(String(c.value ?? '')), c.flags);
+    }
+    case 'elementCount': {
+      const list = await findList(sess, c.target, scope, { outer: scope.currentItem?.() });
+      const want = Number(scope.resolve(String(c.value ?? 1)).replace(/,/g, ''));
+      if (!Number.isFinite(want)) throw new Error(`요소 개수 비교 값이 숫자가 아닙니다: ${c.value}`);
+      return compareValues(String(list.count), c.op ?? '>=', String(want));
+    }
     case 'not':
       return !(await checkCondition(rc, c.condition));
     case 'all':
@@ -84,7 +193,7 @@ export function describeCondition(rc, cond) {
   const fill = (c) => {
     if (!c || typeof c !== 'object') return c;
     const out = { ...c };
-    for (const k of ['text', 'value']) {
+    for (const k of ['text', 'value', 'pattern']) {
       if (typeof out[k] !== 'string') continue;
       try {
         out[k] = rc.scope.resolve(out[k]);

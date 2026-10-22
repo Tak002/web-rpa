@@ -1,8 +1,8 @@
 // 페이지 안에서 쓰는 요소 도구 — 녹화기·실행기·AI 관찰기가 같은 규칙을 쓴다.
 // 문서마다 설치되며 window.__webRpa 로 노출된다: 타겟 번들 만들기(targetOf), 후보로 찾기(find·count),
-// 글자 확인(hasText), 값 읽기(valueOf), 화면 요소 목록(snapshot).
+// 글자 확인(hasText), 값 읽기(valueOf), 화면 요소 목록(snapshot), 목록 항목 도구(countIn·pickIn·itemInfo·listTargetOf·relativeTargetOf).
 (() => {
-  const VERSION = 4;
+  const VERSION = 6;
   const W = window;
   if (W.__webRpa && W.__webRpa.version === VERSION) return true;
 
@@ -451,13 +451,247 @@
     Object.defineProperty(W, '__webRpaRefs', { value: refs, configurable: true, writable: true });
     return { lines, truncated: refs.length >= max, title: document.title, url: location.href };
   }
-  function targetOfRef(n) {
+  function refEl(n) {
     const el = (W.__webRpaRefs || [])[Number(n) - 1];
     if (!el || !el.isConnected) throw new Error('참조한 요소가 화면에서 사라졌습니다. 화면을 다시 관찰해 주세요.');
-    return targetOf(el);
+    return el;
+  }
+  function targetOfRef(n) {
+    return targetOf(refEl(n));
   }
 
-  const api = { version: VERSION, norm, compact, textOf, labelOf, visible, find, count, pick, targetOf, valueOf, hasText, snapshot, targetOfRef, isVolatile, stableParts, allRoots };
+  // ---------- 목록 항목 (forEach) ----------
+  /** root 안에서 후보로 찾기 — 항목 기준 상대 선택자(css td:nth-child(3), :scope > td, xpath .//a, 글자). root 자신도 맞으면 넣는다. */
+  function findIn(root, c) {
+    if (!root || !c) return [];
+    const v = c.value;
+    if (c.kind === 'xpath') {
+      const r = document.evaluate(String(v), root, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+      const out = [];
+      for (let i = 0; i < r.snapshotLength; i += 1) {
+        let n = r.snapshotItem(i);
+        if (n && n.nodeType !== 1) n = n.parentElement;
+        if (n && !out.includes(n)) out.push(n);
+      }
+      return out;
+    }
+    if (c.kind === 'text') {
+      const want = norm(v && v.text);
+      if (!want) return [];
+      const tag = String((v && v.tag) || '*').toLowerCase();
+      const all = [...(root.matches(tag) ? [root] : []), ...root.querySelectorAll(tag)];
+      return all.filter((el) => textOf(el) === want);
+    }
+    const sel = String(v);
+    return [...(root.matches(sel) ? [root] : []), ...root.querySelectorAll(sel)];
+  }
+  /** 항목 사슬 [{ c, i }] → 지금 항목 요소. 바깥 항목부터, 단계마다 보이는 요소 중 i 번째(0부터). */
+  function itemRoot(chain) {
+    let root = null;
+    for (const link of chain || []) {
+      const els = (root ? findIn(root, link.c) : find(link.c)).filter(visible);
+      root = els[link.i] || null;
+      if (!root) return null;
+    }
+    return root;
+  }
+  /** 항목 안에서 후보마다 { total, visible }. 항목이 없으면 { missing: true } */
+  function countIn(chain, cands) {
+    const root = itemRoot(chain);
+    if (!root) return { missing: true };
+    return {
+      counts: cands.map((c) => {
+        try {
+          const els = findIn(root, c);
+          return { total: els.length, visible: els.filter(visible).length };
+        } catch (e) {
+          return { total: 0, visible: 0, error: String((e && e.message) || e).slice(0, 200) };
+        }
+      }),
+    };
+  }
+  /** 항목 안의 유일한 요소 하나 */
+  function pickIn(chain, c, wantVisible) {
+    const root = itemRoot(chain);
+    if (!root) return null;
+    const els = findIn(root, c);
+    const vis = els.filter(visible);
+    if (wantVisible) return vis.length === 1 ? vis[0] : null;
+    return els.length === 1 ? els[0] : null;
+  }
+  /** 항목의 글자({{item.text}})와 표의 칸 글자({{item.cell:N}} — 행이 아니면 null) */
+  function itemInfo(chain) {
+    const root = itemRoot(chain);
+    if (!root) return null;
+    const tr = root.tagName === 'TR' ? root : root.closest('tr');
+    const cells = tr ? [...tr.children].filter((c) => c.tagName === 'TD' || c.tagName === 'TH').map((c) => clip(norm(c.innerText ?? c.textContent), 2000)) : null;
+    return { text: clip(norm(root.innerText ?? root.textContent), 2000), cells, tag: lower(root) };
+  }
+
+  const isDataRow = (tr) => [...tr.children].some((c) => c.tagName === 'TD');
+  const classKey = (el) =>
+    [...el.classList]
+      .filter((c) => !isVolatile(c))
+      .sort()
+      .join('.');
+  /** 같은 부모 아래 같은 태그·같은 클래스의 형제들 */
+  function siblingsLike(el) {
+    const p = el.parentElement;
+    if (!p) return [el];
+    const key = classKey(el);
+    return [...p.children].filter((c) => c.tagName === el.tagName && classKey(c) === key);
+  }
+  /** 요소가 들어 있는 목록 항목: 표의 행 → 목록 항목(li) → 같은 모양 형제가 둘 이상인 가장 가까운 조상 */
+  function itemOf(el) {
+    if (el && el.nodeType !== 1) el = el.parentElement;
+    if (!el) return null;
+    const tr = el.closest('tr');
+    if (tr && tr.parentElement && isDataRow(tr)) return tr;
+    const li = el.closest('li');
+    if (li && li.parentElement) return li;
+    for (let cur = el; cur && cur.parentElement && cur !== document.body; cur = cur.parentElement) if (siblingsLike(cur).length >= 2) return cur;
+    return null;
+  }
+  /** 항목과 같은 모양의 형제들 (표는 같은 tbody 의 데이터 행) */
+  function groupOf(item) {
+    if (item.tagName === 'TR') return [...item.parentElement.children].filter((c) => c.tagName === 'TR' && isDataRow(c));
+    if (item.tagName === 'LI') return [...item.parentElement.children].filter((c) => c.tagName === 'LI');
+    return siblingsLike(item);
+  }
+  function tableName(table) {
+    if (!table) return '';
+    const cap = table.caption && norm(table.caption.innerText);
+    if (cap) return clip(cap, 30);
+    for (const a of ['aria-label', 'summary', 'title']) {
+      const v = norm(table.getAttribute(a));
+      if (v) return clip(v, 30);
+    }
+    let p = table.previousElementSibling;
+    for (let k = 0; p && k < 3; k += 1, p = p.previousElementSibling) if (/^H[1-6]$/.test(p.tagName) && norm(p.innerText)) return clip(norm(p.innerText), 30);
+    return '';
+  }
+
+  /** 참조한 요소가 들어 있는 목록(같은 모양의 형제들)에 맞는 items 타겟 → { candidates, meta, count, sample } */
+  function listTargetOf(n) {
+    const el = refEl(n);
+    const item = itemOf(el);
+    if (!item) throw new Error('이 요소에서 같은 모양으로 되풀이되는 목록(표의 행·목록 항목·카드)을 찾지 못했습니다.');
+    const group = groupOf(item).filter(visible);
+    const parent = item.parentElement;
+    const tag = lower(item);
+    const key = classKey(item);
+    const cls = key ? `.${key.split('.').map((c) => CSS.escape(c)).join('.')}` : '';
+    const rowFilter = tag === 'tr' && [...parent.children].some((c) => c.tagName === 'TR' && !isDataRow(c)) ? ':has(> td)' : '';
+    const same = (els) => {
+      const vis = els.filter(visible);
+      return vis.length === group.length && group.every((g) => vis.includes(g));
+    };
+    const cands = [];
+    const seen = new Set();
+    const add = (kind, value, score) => {
+      if (!value || seen.has(`${kind}:${value}`)) return;
+      seen.add(`${kind}:${value}`);
+      try {
+        if (same(find({ kind, value }))) cands.push({ kind, value, score });
+      } catch {
+        /* 이 브라우저가 모르는 선택자 */
+      }
+    };
+    const pPath = cssPath(parent);
+    if (cls) add('css', `${pPath} > ${tag}${cls}${rowFilter}`, pPath.startsWith('#') ? 88 : 72);
+    add('css', `${pPath} > ${tag}${rowFilter}`, pPath.startsWith('#') ? 86 : 70);
+    if (cls) add('css', `${tag}${cls}`, 80);
+    if (tag === 'tr') {
+      const table = item.closest('table');
+      const tcls = table ? classKey(table) : '';
+      if (tcls) add('css', `table.${tcls.split('.').map((c) => CSS.escape(c)).join('.')} > ${lower(parent)} > tr${rowFilter}`, 78);
+      add('xpath', `${absXPath(parent)}/tr[td]`, 45);
+    } else add('xpath', `${absXPath(parent)}/${tag}`, 45);
+    cands.sort((a, b) => b.score - a.score);
+    const meta = { tag };
+    if (tag === 'tr') {
+      const name = tableName(item.closest('table'));
+      meta.label = name ? `${name} 표의 행` : '표의 행';
+    } else meta.label = tag === 'li' ? '목록의 항목' : `같은 모양의 ${tag}${cls ? cls.split('.').slice(0, 2).join('.') : ''} 항목`;
+    const sample = group.slice(0, 3).map((g) => clip(norm(g.innerText ?? g.textContent), 60));
+    if (sample[0]) meta.text = sample[0];
+    meta.count = group.length;
+    return { candidates: cands.slice(0, 6), meta, count: group.length, sample };
+  }
+
+  /** root → el 구조 경로 (:scope > td:nth-of-type(3) > a) */
+  function relPath(root, el, xpath) {
+    const parts = [];
+    for (let cur = el; cur && cur !== root; cur = cur.parentElement) {
+      const parent = cur.parentElement;
+      if (!parent) return '';
+      const tag = lower(cur);
+      const same = [...parent.children].filter((c) => c.tagName === cur.tagName);
+      const k = same.indexOf(cur) + 1;
+      parts.unshift(xpath ? `${tag}${same.length > 1 ? `[${k}]` : ''}` : `${tag}${same.length > 1 ? `:nth-of-type(${k})` : ''}`);
+    }
+    return xpath ? `./${parts.join('/')}` : `:scope > ${parts.join(' > ')}`;
+  }
+
+  /** 항목(itemN 참조가 든 목록 항목) 기준 상대 후보만 담은 타겟 → { candidates, meta } (within: 'item' 은 Node 쪽에서 붙인다) */
+  function relativeTargetOf(n, itemN) {
+    const el = refEl(n);
+    const root = itemOf(refEl(itemN));
+    if (!root) throw new Error('항목(표의 행·목록 항목·카드)을 찾지 못했습니다.');
+    if (!root.contains(el)) throw new Error('대상 요소가 그 항목 안에 있지 않습니다. 같은 행(항목) 안의 요소를 고르세요.');
+    const others = groupOf(root).filter((g) => g !== root && visible(g));
+    const tag = lower(el);
+    const cands = [];
+    const seen = new Set();
+    // 다른 항목에서도 하나씩 맞는 후보일수록 점수를 그대로 두고, 이 항목에서만 맞으면 낮춘다 (행마다 바뀌는 글자 등)
+    const add = (kind, value, score) => {
+      const key = `${kind}:${typeof value === 'string' ? value : JSON.stringify(value)}`;
+      if (!value || seen.has(key)) return;
+      seen.add(key);
+      let els;
+      try {
+        els = findIn(root, { kind, value });
+      } catch {
+        return;
+      }
+      if (els.length !== 1 || els[0] !== el) return;
+      const hits = others.filter((g) => {
+        try {
+          return findIn(g, { kind, value }).length === 1;
+        } catch {
+          return false;
+        }
+      }).length;
+      const stable = !others.length || hits * 2 >= others.length;
+      cands.push({ kind, value, score: stable ? score : Math.min(score, 30) });
+    };
+    if (el === root) add('css', ':scope', 92);
+    for (const a of ['data-testid', 'data-test-id', 'data-test', 'data-qa', 'data-cy', 'name', 'aria-label', 'title', 'alt', 'placeholder']) {
+      const v = el.getAttribute(a);
+      if (v && !isVolatile(v) && v.length <= 60) add('attr', `${tag}[${a}="${cssStr(v)}"]`, a.startsWith('data-') ? 90 : 82);
+    }
+    const t = textOf(el);
+    if (t && t.length <= 60 && !isFormControl(el)) {
+      add('text', { tag, text: t }, 78);
+      add('xpath', `.//${tag}[normalize-space()=${xq(t)}]`, 64);
+    }
+    if (el !== root) {
+      add('css', relPath(root, el, false), 70);
+      add('xpath', relPath(root, el, true), 50);
+    }
+    cands.sort((a, b) => b.score - a.score);
+    // 이름은 견본 행의 글자 대신 열 이름(표 머리)으로 — 행마다 값이 다르다
+    const meta = { ...targetOf(el).meta };
+    const ri = rowInfo(el);
+    if (ri?.col) {
+      meta.col = ri.col;
+      meta.label ||= ri.col;
+    }
+    if (ri?.own) meta.colIndex = ri.cells.indexOf(ri.own) + 1;
+    return { candidates: cands.slice(0, 8), meta };
+  }
+
+  const api = { version: VERSION, norm, compact, textOf, labelOf, visible, find, count, pick, targetOf, valueOf, hasText, snapshot, targetOfRef, isVolatile, stableParts, allRoots, findIn, countIn, pickIn, itemInfo, listTargetOf, relativeTargetOf };
   Object.defineProperty(W, '__webRpa', { value: api, configurable: true, writable: true, enumerable: false });
   return true;
 })()

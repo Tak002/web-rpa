@@ -1,4 +1,5 @@
-// 값 치환: {{이름}}, {{이름|변환|변환}}, 예약 이름(row, lastDialogMessage), 날짜 토큰({{sys:…}}).
+// 값 치환: {{이름}}, {{이름|변환|변환}}, 예약 이름(row, lastDialogMessage), 날짜 토큰({{sys:…}}),
+// 반복 토큰({{loop.index}}·{{loop.count}}), 목록 항목 토큰({{item.text}}·{{item.index}}·{{item.cell:N}}).
 
 export const TOKEN_RE = /\{\{\s*([^{}]+?)\s*\}\}/g;
 export const RESERVED_NAMES = new Set(['row', 'lastDialogMessage']);
@@ -9,7 +10,7 @@ export function parseToken(inner) {
   return { name: parts[0].trim(), transforms: parts.slice(1).map((t) => t.trim()).filter(Boolean) };
 }
 
-export const isReservedName = (name) => RESERVED_NAMES.has(name) || /^sys:/.test(name);
+export const isReservedName = (name) => RESERVED_NAMES.has(name) || /^sys:/.test(name) || /^(item|loop)\./.test(name);
 
 export class UndefinedVariableError extends Error {
   constructor(name) {
@@ -119,6 +120,51 @@ export class Scope {
     }
     this.secretNames = new Set((recipe.variables ?? []).filter((v) => v.source?.secret).flatMap((v) => [v.id, v.name].filter(Boolean)));
     this.depth = 0;
+    this.loops = []; // 반복 문맥 (가장 안쪽이 끝): { kind: 'repeat'|'forEach', index, count, …항목 정보 }
+    this.lastLoopCount = undefined; // 끝난 반복의 횟수 (반복 뒤의 {{loop.count}})
+    this.latest = {}; // 값 읽기의 마지막 값 (반복 안에서 {{이름}} 은 이 값)
+    this.collecting = new Set(); // 반복 안에서 읽어 행 결과에 줄바꿈으로 모으는 이름
+  }
+
+  /** 가장 안쪽 목록 항목 문맥 (forEach) */
+  currentItem() {
+    for (let i = this.loops.length - 1; i >= 0; i -= 1) if (this.loops[i].kind === 'forEach') return this.loops[i];
+    return null;
+  }
+
+  /** {{loop.…}}·{{item.…}} 값. 반복 밖이면 undefined. */
+  loopValue(name) {
+    const top = this.loops.at(-1);
+    if (name === 'loop.index') return top ? String(top.index) : undefined;
+    if (name === 'loop.count') return top ? String(top.count) : this.lastLoopCount !== undefined ? String(this.lastLoopCount) : undefined;
+    const item = this.currentItem();
+    if (!item) return undefined;
+    if (name === 'item.text') return String(item.info?.text ?? '');
+    if (name === 'item.index') return String(item.index);
+    const m = /^item\.cell:(\d+)$/.exec(name);
+    if (m) {
+      const cells = item.info?.cells;
+      if (!Array.isArray(cells)) return undefined; // 표의 행이 아니다
+      return String(cells[Number(m[1]) - 1] ?? '');
+    }
+    return undefined;
+  }
+
+  /**
+   * 값 읽기 결과를 남긴다. 반복 밖은 지금과 같다(행 결과 = 마지막 값).
+   * 반복 안에서는 {{이름}} 이 마지막 값이고, 행 결과(extracted)에는 읽은 값을 순서대로 줄바꿈으로 이어 남긴다.
+   */
+  saveExtract(name, value) {
+    const v = String(value ?? '');
+    this.latest[name] = v;
+    if (!this.loops.length) {
+      this.extracted[name] = v;
+      this.collecting.delete(name);
+    } else if (this.collecting.has(name) && Object.hasOwn(this.extracted, name)) this.extracted[name] = `${this.extracted[name]}\n${v}`;
+    else {
+      this.extracted[name] = v;
+      this.collecting.add(name);
+    }
   }
 
   /** 이름의 값. 없으면 undefined. */
@@ -126,6 +172,8 @@ export class Scope {
     if (name === 'row') return String(this.rowNumber);
     if (name === 'lastDialogMessage') return this.dialog() ?? '';
     if (name.startsWith('sys:')) return sysValue(name);
+    if (name.startsWith('loop.') || name.startsWith('item.')) return this.loopValue(name);
+    if (Object.hasOwn(this.latest, name)) return this.latest[name];
     if (Object.hasOwn(this.extracted, name)) return this.extracted[name];
     const v = this.vars.get(name);
     if (v) {

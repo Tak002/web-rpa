@@ -222,7 +222,7 @@ async function main() {
     const kinds = findPII(`주민 ${rrn} 사업자 ${brn} 전화 010-1234-5678 메일 ${email} 카드 4111 1111 1111 1111 예시 ${['me', 'example.com'].join('@')}`).map((x) => x.kind);
     check('개인정보: 주민번호·사업자번호·휴대전화·이메일·카드번호', ['주민·외국인등록번호', 'brn', '휴대전화', '이메일', '카드번호'].every((k) => kinds.includes(k)), kinds.join(','));
     check('개인정보: example.com 이메일·검증번호가 틀린 숫자는 제외', kinds.filter((k) => k === '이메일').length === 1 && !findPII('1111111111 900101-1234567').length);
-    check('버전 범위', satisfies('0.2.0', '>=0.2.0 <0.3.0') && !satisfies('0.3.0', '>=0.2.0 <0.3.0') && engineRangeFor('0.2.0') === '>=0.2.0 <0.3.0' && ENGINE_VERSION === '0.2.0');
+    check('버전 범위', satisfies('0.2.0', '>=0.2.0 <0.3.0') && !satisfies('0.3.0', '>=0.2.0 <0.3.0') && engineRangeFor('0.2.0') === '>=0.2.0 <0.3.0' && satisfies(ENGINE_VERSION, engineRangeFor(ENGINE_VERSION))); // 지금 엔진은 자기가 내보내는 범위에 든다 (버전을 올려도 깨지지 않게)
 
     // =====================================================================
     section('2. 실험실에서 녹화한 레시피 정리');
@@ -432,7 +432,7 @@ async function main() {
     const imported = (await api('POST', '/api/recipes', labRecipe(LAB))).data.recipe;
     res = await api('GET', `/api/recipes/${imported.id}/set-draft`);
     const draft = res.data;
-    check('내보내기 초안: manifest·남은 값·위험·열', res.ok && draft.manifest.engine.webRpa === '>=0.2.0 <0.3.0' && draft.remaining.some((x) => x.id === 'var:2:default') && draft.columns.join() === '사업자번호,기간' && draft.origins[0] === LAB, JSON.stringify(draft).slice(0, 300));
+    check('내보내기 초안: manifest·남은 값·위험·열', res.ok && draft.manifest.engine.webRpa === engineRangeFor(ENGINE_VERSION) && draft.remaining.some((x) => x.id === 'var:2:default') && draft.columns.join() === '사업자번호,기간' && draft.origins[0] === LAB, JSON.stringify(draft).slice(0, 300));
     check('내보내기 초안: 기대 결과 초안(값 이름만)', draft.expected?.rows?.['*']?.values?.합계?.regex === '\\S');
     const body = labSetInput(LAB, labRecipe(LAB));
     res = await api('POST', `/api/recipes/${imported.id}/set`, { ...body, check: true });
